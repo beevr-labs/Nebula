@@ -24,11 +24,11 @@
     "@huggingface/transformers": "^3",
     "@mlc-ai/web-llm": "^0.2",
     "@surrealdb/wasm": "^1",
-    "surrealdb": "^1",
     "@tauri-apps/api": "^2",
-    "pdfjs-dist": "^4",
     "gpt-tokenizer": "^2",
-    "gray-matter": "^4"
+    "gray-matter": "^4",
+    "pdfjs-dist": "^4",
+    "surrealdb": "^1"
   },
   "devDependencies": {
     "@playwright/test": "^1",
@@ -38,6 +38,7 @@
     "@tauri-apps/cli": "^2",
     "@typescript-eslint/eslint-plugin": "^8",
     "@typescript-eslint/parser": "^8",
+    "@webgpu/types": "^0.1.70",
     "eslint": "^9",
     "eslint-plugin-svelte": "^2",
     "prettier": "^3",
