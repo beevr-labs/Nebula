@@ -1,0 +1,37 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Nebula",
+  "version": "0.1.0",
+  "identifier": "ai.beevr.nebula",
+  "build": {
+    "frontendDist": "../build",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Nebula",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 900,
+        "minHeight": 600,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' https://huggingface.co https://*.hf.co https://raw.githubusercontent.com; worker-src 'self' blob:",
+      "headers": {
+        "Cross-Origin-Opener-Policy": "same-origin",
+        "Cross-Origin-Embedder-Policy": "require-corp"
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "msi"],
+    "icon": ["icons/icon.ico"]
+  },
+  "//": "GATE A: the COOP/COEP headers above must make self.crossOriginIsolated === true in the packaged app, not just dev. connect-src allows ONLY the model-download hosts — keep this tight (NFR-SEC-001). Phase 2: add macos/linux bundle targets. The Vault FS scope is set at runtime via the fs plugin capability, NOT a static allowlist, because the Vault path is user-chosen (see capabilities/default.json)."
+}

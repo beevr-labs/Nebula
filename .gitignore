@@ -1,0 +1,30 @@
+# dependencies
+node_modules/
+src-tauri/target/
+
+# build output
+build/
+.svelte-kit/
+dist/
+
+# model weights cache (large, downloaded at runtime — NEVER commit)
+models/
+*.bin
+*.onnx
+*.wasm.cache
+
+# local app data / vaults (never commit user content)
+*.nebula/
+NebulaVault/
+
+# os / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# logs & benches
+*.log
+tests/bench/out/
+
+# DO commit: package-lock.json, Cargo.lock, models.manifest.json (hashes, not weights)

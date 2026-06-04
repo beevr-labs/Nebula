@@ -1,0 +1,38 @@
+[package]
+name = "nebula"
+version = "0.1.0"
+description = "Nebula — local-first knowledge graph & context engine"
+edition = "2021"
+rust-version = "1.77"
+license = "TBD"
+
+[lib]
+name = "nebula_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-fs = "2"          # scoped filesystem (NFR-SEC-003); lock the scope in capabilities/
+tauri-plugin-dialog = "2"      # Vault folder picker
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util"] }
+reqwest = { version = "0.12", features = ["stream"] }   # resumable model download (FR-MDL-001)
+sha2 = "0.10"                  # weight hash verification (FR-MDL-002)
+notify = "6"                   # external-edit detection (FR-DATA-003)
+thiserror = "1"                # NebulaError -> error catalog (CODING-STANDARDS §3)
+
+# Phase 2 (native InferenceProvider, ADR-001) — add behind a feature flag:
+# mistral-rs = { version = "...", optional = true }
+# [features]
+# native-inference = ["dep:mistral-rs"]
+
+[profile.release]
+opt-level = "s"   # small binary (NFR-RES-002)
+lto = true
+strip = true
+
+# NOTE: candidate versions — run `cargo build`, then COMMIT Cargo.lock (DEPENDENCIES.lock §7).

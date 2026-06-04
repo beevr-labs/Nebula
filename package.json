@@ -1,0 +1,52 @@
+{
+  "name": "nebula",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Nebula — local-first knowledge graph & context engine (Windows-first MVP).",
+  "license": "TBD",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write .",
+    "test:unit": "vitest run",
+    "test:int": "vitest run --dir tests/integration",
+    "test:e2e": "playwright test",
+    "bench": "node tests/bench/run.mjs"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3",
+    "@mlc-ai/web-llm": "^0.2",
+    "@surrealdb/wasm": "^1",
+    "surrealdb": "^1",
+    "@tauri-apps/api": "^2",
+    "pdfjs-dist": "^4",
+    "gpt-tokenizer": "^2",
+    "gray-matter": "^4"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1",
+    "@sveltejs/adapter-static": "^3",
+    "@sveltejs/kit": "^2",
+    "@sveltejs/vite-plugin-svelte": "^4",
+    "@tauri-apps/cli": "^2",
+    "@typescript-eslint/eslint-plugin": "^8",
+    "@typescript-eslint/parser": "^8",
+    "eslint": "^9",
+    "eslint-plugin-svelte": "^2",
+    "prettier": "^3",
+    "prettier-plugin-svelte": "^3",
+    "svelte": "^5",
+    "svelte-check": "^4",
+    "typescript": "^5",
+    "vite": "^5",
+    "vitest": "^2"
+  },
+  "//": "Candidate ranges only — run `npm install`, then COMMIT package-lock.json with exact resolved versions (DEPENDENCIES.lock §7). Confirm @huggingface/transformers v3 vs v4 and the exact WebLLM model IDs during the Phase 0 spike."
+}
