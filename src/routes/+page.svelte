@@ -18,6 +18,7 @@
   import { CHAT_MODELS, formatSize, needsOomAck, modelById } from '$lib/inference/catalog';
   import { createNote, updateNote, renameNote, moveNotePath } from '$lib/vault/note-crud';
   import { serializeNote } from '$lib/vault/note';
+  import { putSource, allSources, deleteSource } from '$lib/vault/sources-db';
   import {
     resolveTarget,
     buildBacklinks,
@@ -293,6 +294,13 @@
       }
     }
 
+    // Rehydrate proxy-note source binaries so Export Vault still ships the originals after a refresh.
+    try {
+      originals = await allSources();
+    } catch (e) {
+      console.warn('Nebula: could not load source binaries:', e);
+    }
+
     const provider = new WebLLMProvider();
     pipe = {
       embed: (t) => embedClient.embedQuery(t),
@@ -382,6 +390,7 @@
             ...originals.filter((o) => o.path !== sourcePath),
             { path: sourcePath, bytes }
           ];
+          await putSource(sourcePath, bytes); // persist the original so Export survives a refresh
         }
         importMsg = `✓ ingested ${docId} (${res.type})`;
         showSource(docId);
@@ -539,6 +548,11 @@
     if (!confirm(`Delete ${docId}?\nThis removes it from the vault and the search index.`)) return;
     await pipe.removeDoc(docId);
     await pipe.forgetNote(docId); // drop the persisted note doc too, so it stays deleted after refresh
+    const gone = vault.find((n) => n.docId === docId);
+    if (gone?.sourcePath) {
+      originals = originals.filter((o) => o.path !== gone.sourcePath);
+      await deleteSource(gone.sourcePath); // forget the persisted original binary too
+    }
     vault = vault.filter((n) => n.docId !== docId);
     if (activeDoc === docId) {
       activeDoc = null;
