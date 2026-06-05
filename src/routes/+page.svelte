@@ -338,10 +338,15 @@
         let sourcePath: string | undefined;
         if (res.type === 'pdf') {
           try {
+            importMsg = `reading PDF ${file.name}…`;
             const { extractPdf } = await import('$lib/ingest/pdf');
             body = (await extractPdf(bytes)).text;
-          } catch {
-            importMsg = `PDF parsing needs the desktop app — skipped ${file.name}`;
+            if (!body.trim()) {
+              importMsg = `${file.name} has no extractable text (scanned image PDF?) — skipped`;
+              continue;
+            }
+          } catch (e) {
+            importMsg = `couldn't read ${file.name}: ${e instanceof Error ? e.message : String(e)}`;
             continue;
           }
           sourcePath = `sources/${file.name}`;
