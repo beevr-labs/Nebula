@@ -14,7 +14,7 @@
   import { intake } from '$lib/ingest/intake';
   import { csvToMarkdown } from '$lib/ingest/csv';
   import { buildProxyNote, proxyNotePath } from '$lib/ingest/proxy';
-  import { createNote, updateNote, validateDraft } from '$lib/vault/note-crud';
+  import { createNote, updateNote } from '$lib/vault/note-crud';
   import { serializeNote } from '$lib/vault/note';
   import {
     resolveTarget,
@@ -329,9 +329,10 @@
   // searchable, citable, weave-linkable, and exportable to any LLM (Export Vault / Context Compiler).
   function startNewNote() {
     editingDocId = null;
-    draftTitle = '';
+    draftTitle = today(); // subject pre-filled with today's date (overwrite if you want)
     draftBody = '';
     editMsg = '';
+    activeTag = null; // so returning to the vault lands on the folder tree, not a stale filter
     mode = 'write';
   }
 
@@ -345,11 +346,9 @@
 
   async function saveNote() {
     if (!pipe || !ready || savingNote) return;
-    const v = validateDraft({ title: draftTitle, body: draftBody });
-    if (!v.ok) {
-      editMsg = v.reason;
-      return;
-    }
+    // Never block a save on a missing subject — default it to today's date. Duplicates are
+    // fine: createNote auto-suffixes the path (-2, -3…) so nothing is ever overwritten.
+    draftTitle = draftTitle.trim() || today();
     savingNote = true;
     editMsg = 'saving…';
     try {
@@ -391,9 +390,12 @@
         }
       ];
       editMsg = `✓ saved ${file.docId}`;
-      editingDocId = file.docId;
+      editingDocId = null;
       mode = 'ask';
-      showSource(file.docId);
+      // Land back on the folder tree (clear any tag filter / open doc), so navigation isn't lost.
+      activeTag = null;
+      activeDoc = null;
+      activeSpan = null;
     } catch (e) {
       editMsg = 'error: ' + (e instanceof Error ? e.message : String(e));
     } finally {

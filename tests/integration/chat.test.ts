@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { vectorSearch, type IndexedChunk } from '../../src/lib/retrieval/search';
-import { assemblePrompt, parseCitations } from '../../src/lib/chat/prompt';
+import { assemblePrompt, parseCitations, NO_RESULTS_MESSAGE } from '../../src/lib/chat/prompt';
 import { MockInferenceProvider } from '../../src/lib/inference/mock';
 import type { GenerateRequest } from '../../src/lib/inference/provider';
 
@@ -78,7 +78,7 @@ describe('TC-CHAT — grounded, cited answer via the mock provider', () => {
     const spy = vi.spyOn(provider, 'generate');
     // Caller answers directly from the no-results result; generate is never invoked.
     if (prompt.kind === 'no_results') {
-      expect(prompt.message).toBe('No relevant context found.');
+      expect(prompt.message).toBe(NO_RESULTS_MESSAGE);
     }
     expect(spy).not.toHaveBeenCalled();
   });
