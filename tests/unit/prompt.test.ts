@@ -4,6 +4,7 @@ import {
   parseCitations,
   stripPromptEcho,
   SYSTEM_PROMPT,
+  SYSTEM_PROMPT_REASON,
   NO_RESULTS_MESSAGE
 } from '../../src/lib/chat/prompt';
 import type { SearchHit } from '../../src/lib/inference/provider';
@@ -44,6 +45,20 @@ describe('assemblePrompt', () => {
       expect(r.user).toContain('When does it ship?');
       expect(r.user).not.toContain('# Question');
       expect(r.contextOrder).toEqual(['k1', 'k2']);
+    }
+  });
+
+  it('reason mode swaps in the reasoning system prompt + directive (FR-CHAT-005)', () => {
+    const grounded = assemblePrompt('How should we plan Q3?', hits); // default
+    const reason = assemblePrompt('How should we plan Q3?', hits, { mode: 'reason' });
+    if (grounded.kind === 'grounded' && reason.kind === 'grounded') {
+      expect(grounded.system).toBe(SYSTEM_PROMPT);
+      expect(reason.system).toBe(SYSTEM_PROMPT_REASON);
+      expect(reason.user).toContain('reason and apply your knowledge');
+      expect(reason.user).not.toContain('Using only these notes');
+      // both still carry the same numbered context + cite the same chunks
+      expect(reason.contextOrder).toEqual(['k1', 'k2']);
+      expect(reason.user).toContain('[#1] (source: notes/a.md, p.1)');
     }
   });
 

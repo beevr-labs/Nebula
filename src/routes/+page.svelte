@@ -181,6 +181,10 @@
   // Retrieval scope (FR-RET-004) — restrict Ask + Compile to one client (folder/tag).
   let scope = $state<Scope | null>(null);
 
+  // Answer mode (FR-CHAT-005): 'reason' = apply knowledge + reason WITH the notes (default — what
+  // makes it feel like an assistant, not a search box); 'grounded' = strict, notes-only, verifiable.
+  let answerMode = $state<'grounded' | 'reason'>('reason');
+
   // Context Compiler UI (FR-CTX-*) — compact, token-counted share to another LLM.
   const COMPILE_MODELS = ['gpt-4o', 'gpt-4', 'claude-sonnet', 'claude-opus'];
   let compileOpen = $state(false);
@@ -217,6 +221,7 @@
           context: SearchHit[];
           modelId: string;
           maxTokens: number;
+          answerMode: 'grounded' | 'reason';
         },
         onTok: (t: string) => void,
         sig: AbortSignal
@@ -878,7 +883,15 @@
 
       status = 'generating…';
       const res = await pipe.provider.generate(
-        { requestId: 'q', query, context: hits, modelId, maxTokens: 256 },
+        // Reason mode elaborates, so give it more room than the terse grounded answer.
+        {
+          requestId: 'q',
+          query,
+          context: hits,
+          modelId,
+          maxTokens: answerMode === 'reason' ? 512 : 256,
+          answerMode
+        },
         (t) => {
           answer += t;
         },
@@ -1210,6 +1223,22 @@
               </optgroup>
             {/if}
           </select>
+          <div class="mode-toggle" role="group" aria-label="Answer mode">
+            <button
+              class="mode-btn"
+              class:on={answerMode === 'reason'}
+              disabled={busy}
+              title="Reason WITH your notes — synthesize, infer, and apply knowledge to actually answer"
+              onclick={() => (answerMode = 'reason')}>💡 Reason</button
+            >
+            <button
+              class="mode-btn"
+              class:on={answerMode === 'grounded'}
+              disabled={busy}
+              title="Strict: answer only from the notes, cite everything — verifiable, no outside knowledge"
+              onclick={() => (answerMode = 'grounded')}>📌 Grounded</button
+            >
+          </div>
         </div>
 
         {#if ready}
@@ -2075,6 +2104,30 @@
     background: #fff;
     cursor: pointer;
     max-width: 100%;
+  }
+  .mode-toggle {
+    display: inline-flex;
+    border: 1px solid #d8d8e0;
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .mode-btn {
+    font: inherit;
+    font-size: 0.78rem;
+    border: 0;
+    background: #fff;
+    color: #6a6a72;
+    padding: 0.3rem 0.55rem;
+    cursor: pointer;
+  }
+  .mode-btn.on {
+    background: #efeaf8;
+    color: #6750a4;
+    font-weight: 600;
+  }
+  .mode-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
   }
   .gpu-bar {
     display: flex;

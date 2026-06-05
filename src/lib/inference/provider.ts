@@ -18,6 +18,7 @@ export interface GenerateRequest {
   context: SearchHit[]; // retrieved chunks that ground the answer
   modelId: string;
   maxTokens: number;
+  answerMode?: 'grounded' | 'reason'; // strict RAG vs reason-with-the-notes (FR-CHAT-005)
 }
 
 export interface GenerateResult {

@@ -59,7 +59,8 @@ export class WebLLMProvider implements InferenceProvider {
     if (!this.engine) throw new Error('Model not loaded');
 
     const prompt = assemblePrompt(req.query, req.context, {
-      maxContextTokens: this.capabilities().maxContextTokens
+      maxContextTokens: this.capabilities().maxContextTokens,
+      mode: req.answerMode
     });
     if (prompt.kind === 'no_results') {
       return {

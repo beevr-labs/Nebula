@@ -4,13 +4,31 @@
 import type { SearchHit } from '$lib/inference/provider';
 import { approxTokenCount, type TokenCounter } from '$lib/ingest/chunker';
 
-/** Exact system prompt (PROMPTS §1) — versioned; changing it must re-run citation tests. */
+export type AnswerMode = 'grounded' | 'reason';
+
+/**
+ * GROUNDED mode (PROMPTS §1) — strict RAG: answer ONLY from the notes, cite everything, never use
+ * outside knowledge. Best when the user needs a verifiable, no-hallucination answer. Versioned —
+ * changing it must re-run citation tests.
+ */
 export const SYSTEM_PROMPT = `You are Nebula's helpful local assistant. Answer the user's question in clear, natural language that an ordinary person understands, grounded in the numbered context chunks from their notes. Rules:
 - Treat the context as your source of truth. Give a direct, useful answer — synthesize, don't quote verbatim, don't pad.
 - When SEVERAL notes are relevant, combine them into one coherent answer and cite each — don't rely on just one note.
 - After a claim, cite the chunk number it came from, inline, like [#2] or [#1][#3]. Never cite a number that is not in the list below.
 - If the notes only partly cover the question, answer what you reasonably can from them and briefly note what's missing — do NOT refuse outright.
 - Only if the notes contain nothing at all related to the question, say so in one plain, friendly sentence. Never use outside knowledge or invent citations.
+- Respond with the ANSWER ONLY. Never repeat the question and never print headers or labels like "Notes:", "Question:", "# Question", or "# Answer".`;
+
+/**
+ * REASON mode — the notes are the PRIMARY source, but the model is asked to think with them:
+ * synthesize, infer, and apply its own knowledge to give a genuinely helpful, problem-solving
+ * answer (not just quote). Note-derived claims are still cited; added reasoning must not contradict
+ * the notes. Best when the user wants the assistant to actually work the problem using their notes.
+ */
+export const SYSTEM_PROMPT_REASON = `You are Nebula's local knowledge assistant. The user's notes are your primary, authoritative source — but your job is to genuinely HELP and solve the problem, not just quote. Rules:
+- Ground your answer in the numbered context from their notes, and REASON with it: connect ideas across notes, draw sensible inferences, work through the question step by step, and apply relevant general knowledge to give a complete, practical answer.
+- Cite the chunk number after any fact taken FROM the notes, inline like [#2] or [#1][#3]. Reasoning or general knowledge you add yourself does not need a citation, but it must stay consistent with the notes and never contradict them. Never cite a number not in the list below.
+- Use the notes as far as they go, then reason about the rest. Prefer a real, useful answer over "the notes don't say." Be clear about anything you are inferring rather than reading directly from the notes.
 - Respond with the ANSWER ONLY. Never repeat the question and never print headers or labels like "Notes:", "Question:", "# Question", or "# Answer".`;
 
 // Friendly, human no-results line (only used when retrieval returns zero chunks).
@@ -23,6 +41,7 @@ export type PromptResult =
 export interface AssembleOptions {
   maxContextTokens?: number; // drop lowest-scoring chunks first if exceeded (never overflow)
   countTokens?: TokenCounter;
+  mode?: AnswerMode; // 'grounded' (default, strict RAG) | 'reason' (apply knowledge with the notes)
 }
 
 function chunkBlock(hit: SearchHit, n: number): string {
@@ -61,12 +80,18 @@ export function assemblePrompt(
 
   const contextOrder = included.map((h) => h.chunkId);
   const blocks = included.map((h, i) => chunkBlock(h, i + 1)).join('\n\n');
+  const mode: AnswerMode = opts.mode ?? 'grounded';
   // The question is embedded in a directive SENTENCE (not under a `# Question` header) so a
   // small model answers it instead of "completing the template" by echoing Question/Answer
   // headers (PROMPTS §1, the echo bug). `stripPromptEcho` is the defensive backstop.
-  const user = `Notes:\n${blocks}\n\nUsing only these notes, answer this question in plain language and cite the chunk numbers you used: ${query}`;
+  const directive =
+    mode === 'reason'
+      ? `Using these notes as your main source, reason and apply your knowledge to give a genuinely helpful answer, citing the chunk numbers for anything taken from the notes`
+      : `Using only these notes, answer this question in plain language and cite the chunk numbers you used`;
+  const user = `Notes:\n${blocks}\n\n${directive}: ${query}`;
+  const system = mode === 'reason' ? SYSTEM_PROMPT_REASON : SYSTEM_PROMPT;
 
-  return { kind: 'grounded', system: SYSTEM_PROMPT, user, contextOrder };
+  return { kind: 'grounded', system, user, contextOrder };
 }
 
 /**
