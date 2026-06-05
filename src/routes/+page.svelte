@@ -137,6 +137,7 @@
   let mode = $state<'ask' | 'write'>('write');
   let draftTitle = $state(new Date().toISOString().slice(0, 10));
   let draftFolder = $state('notes'); // target folder for a NEW note (FR-NOTE-007)
+  const EMBED_PROGRESS_MIN = 4; // only show per-chunk indexing progress past this many chunks
   let draftBody = $state('');
   let editingDocId = $state<string | null>(null); // null → creating a new note
   let editMsg = $state('');
@@ -176,7 +177,11 @@
     embed: (t: string) => Promise<number[]>;
     search: (v: number[], k: number) => Promise<SearchHit[]>;
     relate: (qid: string, hs: SearchHit[]) => Promise<void>;
-    ingest: (docId: string, text: string) => Promise<void>;
+    ingest: (
+      docId: string,
+      text: string,
+      onProgress?: (done: number, total: number) => void
+    ) => Promise<void>;
     removeDoc: (docId: string) => Promise<void>;
     provider: {
       isCached: (m: string) => Promise<boolean>;
@@ -203,22 +208,18 @@
 
   onMount(async () => {
     coi = crossOriginIsolated;
-    const [
-      { chunk },
-      { embedBatch, makeBgeTokenCounter, embed },
-      { VectorStore },
-      { WebLLMProvider },
-      { EMBEDDING_DIM }
-    ] = await Promise.all([
-      import('$lib/ingest/chunker'),
-      import('$lib/embed/embedder'),
-      import('$lib/db/store'),
-      import('$lib/inference/webllm'),
-      import('$lib/inference/provider')
-    ]);
+    const [{ createEmbedClient }, { VectorStore }, { WebLLMProvider }, { EMBEDDING_DIM }] =
+      await Promise.all([
+        import('$lib/embed/embed-client'),
+        import('$lib/db/store'),
+        import('$lib/inference/webllm'),
+        import('$lib/inference/provider')
+      ]);
 
     status = 'loading embedder…';
-    const countTokens = await makeBgeTokenCounter();
+    // ALL chunking + embedding runs in a Worker (ADR-023) so a long note never freezes the UI; the
+    // main thread only upserts the returned vectors into SurrealDB (a cheap, fast DB write).
+    const embedClient = createEmbedClient();
     const store = new VectorStore();
     try {
       // -m3 namespace: the 1024-dim bge-m3 index must not collide with an old 384-dim store (ADR-021).
@@ -227,18 +228,21 @@
       await store.connect('mem://', EMBEDDING_DIM);
     }
 
-    const indexNote = async (docId: string, text: string) => {
-      const cs = chunk(text, { size: 60, overlap: 12, countTokens });
-      const vecs = await embedBatch(cs.map((c) => c.text));
+    const indexNote = async (
+      docId: string,
+      text: string,
+      onProgress?: (done: number, total: number) => void
+    ) => {
+      const embedded = await embedClient.indexText(text, { size: 60, overlap: 12 }, onProgress);
       await store.upsertChunks(
-        cs.map((c, i) => ({
-          chunkId: `${docId}#${c.seq}`,
+        embedded.map((e) => ({
+          chunkId: `${docId}#${e.chunk.seq}`,
           docId,
-          text: c.text,
-          page: c.page,
-          charStart: c.charStart,
-          charEnd: c.charEnd,
-          embedding: vecs[i]
+          text: e.chunk.text,
+          page: e.chunk.page,
+          charStart: e.chunk.charStart,
+          charEnd: e.chunk.charEnd,
+          embedding: e.embedding
         }))
       );
     };
@@ -248,7 +252,7 @@
 
     const provider = new WebLLMProvider();
     pipe = {
-      embed,
+      embed: (t) => embedClient.embedQuery(t),
       search: (v, k) => store.search(v, k),
       relate: (qid, hs) =>
         store.relateRetrieval(
@@ -393,7 +397,10 @@
           existingPaths: vault.map((n) => n.docId)
         });
       }
-      await pipe.ingest(file.docId, draftBody); // searchable + citable immediately
+      // Index with progress so a long note shows "indexing 32/63…" instead of a frozen UI.
+      await pipe.ingest(file.docId, draftBody, (done, total) => {
+        editMsg = total > EMBED_PROGRESS_MIN ? `indexing ${done}/${total} chunks…` : 'saving…';
+      });
       const title = String(file.note.frontmatter.title ?? draftTitle);
       vault = [
         ...vault.filter((n) => n.docId !== file.docId && n.docId !== editingDocId),

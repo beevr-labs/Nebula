@@ -129,7 +129,19 @@ export function chunk(text: string, options: ChunkOptions = {}): Chunk[] {
   const size = options.size ?? 500;
   const overlap = options.overlap ?? 50;
   const maxTokens = options.maxTokens ?? EMBEDDING_MAX_TOKENS;
-  const count = options.countTokens ?? approxTokenCount;
+  // Memoize the tokenizer per chunk() call: recursiveSplit + overlap + emit re-count the SAME
+  // substrings many times (≈10× the doc with the real bge tokenizer — a UI-freezing cost on long
+  // notes). The cache makes repeats O(1); results are identical (pure), GC'd when chunk() returns.
+  const raw = options.countTokens ?? approxTokenCount;
+  const memo = new Map<string, number>();
+  const count: TokenCounter = (t) => {
+    let v = memo.get(t);
+    if (v === undefined) {
+      v = raw(t);
+      memo.set(t, v);
+    }
+    return v;
+  };
 
   assertChunkWindow(size, maxTokens);
   if (overlap >= size) {

@@ -19,6 +19,9 @@ let extractorPromise: Promise<FeatureExtractionPipeline> | null = null;
 let tokenizerPromise: Promise<PreTrainedTokenizer> | null = null;
 
 export function getEmbedder(): Promise<FeatureExtractionPipeline> {
+  // WASM/CPU q8. We tried the WebGPU EP for bge-m3 (XLM-RoBERTa) but its first inference hung
+  // (shader-compile pathology on this op set), so the UI is kept off the embed thread via the
+  // embed Worker (embed.worker.ts) instead — that fixes the freeze without the GPU hang (ADR-023).
   return (extractorPromise ??= pipeline('feature-extraction', EMBEDDING_MODEL, {
     dtype: 'q8'
   }) as unknown as Promise<FeatureExtractionPipeline>);
