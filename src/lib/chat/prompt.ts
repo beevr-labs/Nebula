@@ -9,7 +9,8 @@ export const SYSTEM_PROMPT = `You are Nebula's helpful local assistant. Answer t
 - Treat the context as your source of truth. Give a direct, useful answer — synthesize, don't quote verbatim, don't pad.
 - After a claim, cite the chunk number it came from, inline, like [#2] or [#1][#3]. Never cite a number that is not in the list below.
 - If the notes only partly cover the question, answer what you reasonably can from them and briefly note what's missing — do NOT refuse outright.
-- Only if the notes contain nothing at all related to the question, say so in one plain, friendly sentence. Never use outside knowledge or invent citations.`;
+- Only if the notes contain nothing at all related to the question, say so in one plain, friendly sentence. Never use outside knowledge or invent citations.
+- Respond with the ANSWER ONLY. Never repeat the question and never print headers or labels like "Notes:", "Question:", "# Question", or "# Answer".`;
 
 // Friendly, human no-results line (only used when retrieval returns zero chunks).
 export const NO_RESULTS_MESSAGE = "I couldn't find anything about that in your notes.";
@@ -59,9 +60,29 @@ export function assemblePrompt(
 
   const contextOrder = included.map((h) => h.chunkId);
   const blocks = included.map((h, i) => chunkBlock(h, i + 1)).join('\n\n');
-  const user = `# Context\n${blocks}\n\n# Question\n${query}`;
+  // The question is embedded in a directive SENTENCE (not under a `# Question` header) so a
+  // small model answers it instead of "completing the template" by echoing Question/Answer
+  // headers (PROMPTS §1, the echo bug). `stripPromptEcho` is the defensive backstop.
+  const user = `Notes:\n${blocks}\n\nUsing only these notes, answer this question in plain language and cite the chunk numbers you used: ${query}`;
 
   return { kind: 'grounded', system: SYSTEM_PROMPT, user, contextOrder };
+}
+
+/**
+ * Defensive cleanup of a model answer (PROMPTS §1): small on-device models sometimes echo the
+ * prompt scaffolding ("# Question … # Answer …"). Strip any echoed Question/Notes/Context lead-in
+ * and keep only what follows the last Answer marker. Idempotent; a clean answer passes through.
+ */
+export function stripPromptEcho(text: string): string {
+  let t = text;
+  const answerMarkers = [...t.matchAll(/(?:^|\n)\s*#*\s*answer\s*:?[ \t]*\n?/gi)];
+  if (answerMarkers.length) {
+    const last = answerMarkers[answerMarkers.length - 1];
+    t = t.slice((last.index ?? 0) + last[0].length);
+  }
+  // Drop a leading echoed "Question:" / "# Question …" / "Notes:" / "# Context …" line.
+  t = t.replace(/^\s*(?:#+\s*)?(?:question|notes|context)\b[^\n]*\n?/gi, '');
+  return t.trim();
 }
 
 export interface ParsedCitation {

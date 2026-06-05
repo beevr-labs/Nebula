@@ -486,6 +486,8 @@
       );
       ttft = res.ttftMs;
       tps = Math.round(res.tokensPerSec);
+      // Replace the streamed text with the provider's cleaned final answer (echo stripped).
+      answer = res.text;
       const order = hits.map((h) => h.chunkId);
       cites = res.citations.map((c) => {
         const docId = order.find((id) => id === c.chunkId) ? c.chunkId.split('#')[0] : c.chunkId;
@@ -741,7 +743,10 @@
     >
       ⤓ Export Vault
     </button>
-    <span class="status">{status}{ready && ttft ? ` · TTFT ${ttft}ms · ${tps} tok/s` : ''}</span>
+    <span class="status">
+      {#if busy || !ready}<span class="spinner" aria-hidden="true"></span>{/if}
+      {status}{ready && ttft ? ` · TTFT ${ttft}ms · ${tps} tok/s` : ''}
+    </span>
     <span class="coi" class:ok={coi}>{coi ? 'isolated ✓' : 'not isolated'}</span>
   </header>
 
@@ -811,6 +816,19 @@
             >📦 Compile {scope ? 'scope' : 'vault'}</button
           >
         </div>
+
+        {#if busy || !ready}
+          <div class="loading-banner">
+            <span class="spinner"></span>
+            <span>
+              {status}
+              {#if /model/i.test(status)}<br /><small
+                  >First run downloads the model once (~hundreds of MB), then it's cached — later
+                  runs are fast.</small
+                >{/if}
+            </span>
+          </div>
+        {/if}
 
         {#if hits.length}
           <div class="sources">
@@ -1651,6 +1669,37 @@
   }
   .ask:disabled {
     opacity: 0.5;
+  }
+  .spinner {
+    display: inline-block;
+    width: 0.8rem;
+    height: 0.8rem;
+    border: 2px solid #d9cef2;
+    border-top-color: #6750a4;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    vertical-align: -1px;
+    margin-right: 0.35rem;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  .loading-banner {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.8rem;
+    padding: 0.6rem 0.7rem;
+    background: #f5f2fd;
+    border: 1px solid #e7e0f8;
+    border-radius: 10px;
+    font-size: 0.82rem;
+    color: #5a4a86;
+  }
+  .loading-banner small {
+    color: #8a7fb0;
   }
   .sources,
   .micromap,

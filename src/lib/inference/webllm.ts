@@ -5,7 +5,12 @@
 
 import * as webllm from '@mlc-ai/web-llm';
 import type { InferenceProvider, GenerateRequest, GenerateResult, Backend } from './provider';
-import { assemblePrompt, parseCitations, NO_RESULTS_MESSAGE } from '$lib/chat/prompt';
+import {
+  assemblePrompt,
+  parseCitations,
+  stripPromptEcho,
+  NO_RESULTS_MESSAGE
+} from '$lib/chat/prompt';
 
 const MAX_CONTEXT_TOKENS = 4096;
 
@@ -79,8 +84,17 @@ export class WebLLMProvider implements InferenceProvider {
     }
 
     const seconds = Math.max((performance.now() - start) / 1000, 1e-3);
-    const { citations } = parseCitations(text, prompt.contextOrder);
-    return { requestId: req.requestId, text, citations, ttftMs, tokensPerSec: tokens / seconds };
+    // Defensive: strip any echoed prompt scaffolding the small model emitted, then parse
+    // citations against the CLEANED text so spans line up with what the user sees.
+    const cleaned = stripPromptEcho(text);
+    const { citations } = parseCitations(cleaned, prompt.contextOrder);
+    return {
+      requestId: req.requestId,
+      text: cleaned,
+      citations,
+      ttftMs,
+      tokensPerSec: tokens / seconds
+    };
   }
 
   async unload(): Promise<void> {

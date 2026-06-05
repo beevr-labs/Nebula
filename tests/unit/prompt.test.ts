@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   assemblePrompt,
   parseCitations,
+  stripPromptEcho,
   SYSTEM_PROMPT,
   NO_RESULTS_MESSAGE
 } from '../../src/lib/chat/prompt';
@@ -36,9 +37,12 @@ describe('assemblePrompt', () => {
     expect(r.kind).toBe('grounded');
     if (r.kind === 'grounded') {
       expect(r.system).toBe(SYSTEM_PROMPT);
-      expect(r.user).toContain('# Context');
+      expect(r.user).toContain('Notes:');
       expect(r.user).toContain('[#1] (source: notes/a.md, p.1)');
-      expect(r.user).toContain('# Question\nWhen does it ship?');
+      // question is embedded in a directive sentence (no `# Question` header → no echo)
+      expect(r.user).toContain('answer this question in plain language');
+      expect(r.user).toContain('When does it ship?');
+      expect(r.user).not.toContain('# Question');
       expect(r.contextOrder).toEqual(['k1', 'k2']);
     }
   });
@@ -73,5 +77,24 @@ describe('parseCitations', () => {
     const { citations, dropped } = parseCitations('out of range [#5]', ['k1']);
     expect(citations).toEqual([]);
     expect(dropped).toBe(1);
+  });
+});
+
+describe('stripPromptEcho', () => {
+  it('strips an echoed "# Question … # Answer …" lead-in (the small-model echo bug)', () => {
+    const echoed = '# Question\nhôm nay có gì không\n# Answer\nHôm nay khách đã gửi mail. [#1]';
+    expect(stripPromptEcho(echoed)).toBe('Hôm nay khách đã gửi mail. [#1]');
+  });
+
+  it('strips a leading "Question:" / "Notes:" echo', () => {
+    expect(stripPromptEcho('Question: when ships?\nIt ships in Q3 [#1]')).toBe(
+      'It ships in Q3 [#1]'
+    );
+  });
+
+  it('leaves a clean answer untouched (idempotent)', () => {
+    const clean = 'It ships in Q3 [#1].';
+    expect(stripPromptEcho(clean)).toBe(clean);
+    expect(stripPromptEcho(stripPromptEcho(clean))).toBe(clean);
   });
 });
