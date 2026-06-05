@@ -128,6 +128,7 @@
   let coi = $state(false);
   let modelCached = $state(false); // weights already on disk → fast load, no download (#4)
   let ackedModels = $state(new Set<string>()); // large models the user already OK'd (FR-CAP-003)
+  let gpuBufferLimitGB = $state(0); // WebGPU maxBufferSize cap (Chrome ≈ 2 GB) — gates large models
 
   // Ingestion UI.
   let importMsg = $state('');
@@ -221,6 +222,15 @@
 
   onMount(async () => {
     coi = crossOriginIsolated;
+    // Detect the WebGPU per-buffer cap (Chrome defaults to ~2 GB). A chat model that needs a single
+    // buffer larger than this CAN'T load — that's a browser/platform limit, not VRAM — so we surface
+    // it in the model warnings rather than letting a big model fail with a cryptic error (ADR-029).
+    try {
+      const adapter = await navigator.gpu?.requestAdapter();
+      if (adapter) gpuBufferLimitGB = adapter.limits.maxBufferSize / 1e9;
+    } catch {
+      /* no WebGPU → chat unsupported anyway */
+    }
     const [{ createEmbedClient }, { VectorStore }, { WebLLMProvider }, { EMBEDDING_DIM }] =
       await Promise.all([
         import('$lib/embed/embed-client'),
@@ -765,9 +775,16 @@
         // committing to the download/load (FR-CAP-003). Decline → fall back to the last loaded model.
         if (needsOomAck(modelId) && !ackedModels.has(modelId)) {
           const m = modelById(modelId);
+          const limitNote =
+            gpuBufferLimitGB > 0
+              ? `\n\nYour browser's WebGPU limit is ~${gpuBufferLimitGB.toFixed(1)} GB per buffer ` +
+                `(a Chrome cap, not your VRAM). Models that need a bigger single buffer simply won't ` +
+                `load here — 1–3 B models are the safe choices.`
+              : '';
           const ok = confirm(
-            `${m?.label} needs ~${formatSize(m?.sizeMB ?? 0)} of GPU memory.\n` +
-              `On a GPU with less VRAM it may fail to load or run slowly.\nDownload and load it anyway?`
+            `${m?.label} needs ~${formatSize(m?.sizeMB ?? 0)}.` +
+              limitNote +
+              `\n\nDownload and try to load it anyway?`
           );
           if (!ok) {
             modelId = loadedModel || DEFAULT_MODEL_ID;
@@ -789,12 +806,17 @@
               (status = `${modelCached ? 'loading' : 'downloading'} model ${(p * 100).toFixed(0)}%`)
           );
         } catch (err) {
-          // Most likely OOM / adapter buffer limit on this GPU. Recover gracefully: keep the prior
-          // model, tell the user to pick a smaller one rather than leaving a half-loaded engine.
+          // Most likely the WebGPU per-buffer cap (Chrome ≈ 2 GB) or OOM. Recover gracefully: keep
+          // the prior model and point the user at a smaller one rather than a half-loaded engine.
+          const tooBig = modelById(modelId);
           modelId = loadedModel || DEFAULT_MODEL_ID;
+          const cap =
+            gpuBufferLimitGB > 0
+              ? `~${gpuBufferLimitGB.toFixed(1)} GB WebGPU buffer cap`
+              : 'this GPU';
           status =
-            `⚠ ${modelById(modelId)?.label ?? 'model'} couldn't load on this GPU ` +
-            `(likely out of memory) — try a smaller model. [${err instanceof Error ? err.message : err}]`;
+            `⚠ ${tooBig?.label ?? 'model'} couldn't load — it exceeds ${cap}. ` +
+            `Pick a smaller model (1–3 B). [${err instanceof Error ? err.message : err}]`;
           busy = false;
           return;
         }

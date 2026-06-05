@@ -38,8 +38,19 @@ describe('relevantHits', () => {
   ];
 
   it('drops the low-score tail, keeping only genuinely relevant notes', () => {
-    // cutoff = max(0.35, 0.83 × 0.6 = 0.498) = 0.498 → only security clears it.
+    // cutoff = max(0.45, 0.83 × 0.75 = 0.6225) = 0.6225 → only security clears it.
     expect(relevantHits(hits).map((h) => h.docId)).toEqual(['notes/security.md']);
+  });
+
+  it('drops noise on bge-m3 COMPRESSED scores (the invoice-for-a-security-question case)', () => {
+    // Real bge-m3 scores from the bug report: a security question pulled in an unrelated invoice.
+    const m3 = [
+      { docId: 'notes/security.md', score: 0.68 },
+      { docId: 'notes/Invoice LMX 0626 03.md', score: 0.45 },
+      { docId: 'notes/apollo.md', score: 0.43 }
+    ];
+    // cutoff = max(0.45, 0.68 × 0.75 = 0.51) = 0.51 → invoice (0.45) + apollo (0.43) drop.
+    expect(relevantHits(m3).map((h) => h.docId)).toEqual(['notes/security.md']);
   });
 
   it('keeps several when they are all close to the top score', () => {
