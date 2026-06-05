@@ -137,6 +137,8 @@
   let gpuBufferLimitGB = $state(0); // WebGPU maxBufferSize cap (Chrome ≈ 2 GB) — gates large models
   let gpu = $state<{ ok: boolean; vendor: string; arch: string; maxBufferGB: number } | null>(null);
   let preloading = $state(false); // a background model preload is in flight
+  let loadPhase = $state<'' | 'downloading' | 'loading' | 'compiling'>(''); // model-load stage
+  let loadPct = $state(0); // 0–100 download/load progress for the gpu-bar bar
 
   // Ingestion UI.
   let importMsg = $state('');
@@ -785,14 +787,19 @@
       ackedModels = new Set(ackedModels).add(id);
     }
     modelCached = await pipe.provider.isCached(id).catch(() => false);
+    loadPhase = modelCached ? 'loading' : 'downloading';
+    loadPct = 0;
     status = `${modelCached ? 'loading cached model' : 'first run — downloading model once'}…`;
     try {
-      await pipe.provider.loadModel(
-        id,
-        (p) =>
-          (status = `${modelCached ? 'loading' : 'downloading'} model ${(p * 100).toFixed(0)}%`)
-      );
+      await pipe.provider.loadModel(id, (p) => {
+        loadPct = Math.round(p * 100);
+        // WebLLM reports 100% download well before the GPU finishes compiling shaders — name that
+        // last stage so a few frozen seconds read as "compiling", not "stuck".
+        loadPhase = loadPct >= 100 ? 'compiling' : modelCached ? 'loading' : 'downloading';
+        status = `${loadPhase} model ${loadPct}%`;
+      });
     } catch (err) {
+      loadPhase = '';
       const tooBig = modelById(id);
       modelId = loadedModel || DEFAULT_MODEL_ID;
       const cap =
@@ -802,6 +809,7 @@
         `Pick a smaller model. [${err instanceof Error ? err.message : err}]`;
       return false;
     }
+    loadPhase = '';
     loadedModel = id;
     modelCached = true;
     return true;
@@ -1170,7 +1178,11 @@
 
       {#if mode === 'ask'}
         <div class="controls">
-          <select bind:value={modelId} disabled={busy}>
+          <select
+            bind:value={modelId}
+            disabled={busy || !!loadPhase}
+            title={loadPhase ? 'Locked while a model is loading…' : 'Choose the chat model'}
+          >
             {#each MODELS as m (m.id)}<option value={m.id}
                 >{m.label} · {formatSize(m.sizeMB)}</option
               >{/each}
@@ -1209,21 +1221,41 @@
                   1
                 )} GB/buffer</span
               >
-              {#if loadedModel === modelId}
-                <span class="ok">✓ model loaded</span>
-              {:else if preloading}
-                <span><span class="spinner" aria-hidden="true"></span> preloading…</span>
-              {:else}
-                <button class="mini" onclick={preloadModel} disabled={busy}>⬇ Preload model</button>
-              {/if}
-              {#if rec && rec.id !== modelId}
-                <button
-                  class="mini accent"
-                  onclick={useRecommended}
-                  disabled={busy}
-                  title="Best quality that loads reliably on this GPU (multilingual)"
-                  >★ Use {rec.label}</button
+              {#if loadPhase}
+                <span class="loading-model">
+                  <span class="spinner" aria-hidden="true"></span>
+                  {loadPhase}
+                  {modelById(modelId)?.label ?? 'model'} · {loadPct}%
+                  {#if loadPhase === 'downloading'}<small
+                      >one-time {formatSize(modelById(modelId)?.sizeMB ?? 0)}</small
+                    >{:else if loadPhase === 'compiling'}<small>GPU compiling, a few seconds…</small
+                    >{/if}
+                </span>
+                <span class="progress" aria-hidden="true"
+                  ><span class="progress-fill" style="width:{loadPct}%"></span></span
                 >
+              {:else if loadedModel === modelId}
+                <span class="ok">✓ {modelById(modelId)?.label ?? 'model'} loaded</span>
+                {#if rec && rec.id !== modelId}
+                  <button class="mini accent" onclick={useRecommended} disabled={busy}
+                    >★ Use {rec.label}</button
+                  >
+                {/if}
+              {:else}
+                <button class="mini accent" onclick={preloadModel} disabled={busy}
+                  >⬇ Load {modelById(modelId)?.label ?? 'model'} ({formatSize(
+                    modelById(modelId)?.sizeMB ?? 0
+                  )})</button
+                >
+                {#if rec && rec.id !== modelId}
+                  <button
+                    class="mini"
+                    onclick={useRecommended}
+                    disabled={busy}
+                    title="Best quality that loads reliably on this GPU (multilingual)"
+                    >★ {rec.label} instead</button
+                  >
+                {/if}
               {/if}
             {:else}
               ⚠ No WebGPU — chat unavailable (semantic search still works). Use Chrome/Edge on a
@@ -2061,6 +2093,32 @@
   }
   .gpu-bar .ok {
     color: #1a7f37;
+  }
+  .loading-model {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    color: #6750a4;
+    font-weight: 600;
+  }
+  .loading-model small {
+    color: #8a8a92;
+    font-weight: 400;
+  }
+  .progress {
+    flex: 1 1 8rem;
+    min-width: 6rem;
+    height: 6px;
+    background: #e8e4f4;
+    border-radius: 999px;
+    overflow: hidden;
+  }
+  .progress-fill {
+    display: block;
+    height: 100%;
+    background: #6750a4;
+    border-radius: 999px;
+    transition: width 0.2s ease;
   }
   .mini {
     font: inherit;
