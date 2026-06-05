@@ -162,6 +162,34 @@ export function dedupeByDoc<T extends { docId: string }>(hits: T[], maxDocs = In
   return out;
 }
 
+export interface RelevanceOptions {
+  /** Absolute cosine floor — a hit below this is never relevant, even if it's the top hit. */
+  absolute?: number; // default 0.35
+  /** Relative band: keep hits scoring ≥ topScore × relative (drops the long, low-score tail). */
+  relative?: number; // default 0.6
+}
+
+/**
+ * Trim retrieved hits to the ones ACTUALLY relevant to the query, so References + Micro-Map + the
+ * grounded context don't carry low-score noise (FR-CHAT-002). The over-fetch (k=12/24) favors
+ * recall; this is the precision pass on top of it. Assumes `hits` is sorted desc by score (as
+ * vectorSearch / hybridSearch return). A hit survives iff it clears BOTH:
+ *   • the absolute floor (a 0.31 cosine is noise regardless of the rest), and
+ *   • the relative band below the top hit (so one strong hit at 0.83 doesn't drag in a 0.49).
+ * Returns [] when even the top hit is below the absolute floor — the caller's no-results guard
+ * then fires (NO_RESULTS_MESSAGE) instead of inventing citations.
+ */
+export function relevantHits<T extends { score: number }>(
+  hits: T[],
+  opts: RelevanceOptions = {}
+): T[] {
+  const absolute = opts.absolute ?? 0.35;
+  const relative = opts.relative ?? 0.6;
+  if (hits.length === 0 || hits[0].score < absolute) return [];
+  const cutoff = Math.max(absolute, hits[0].score * relative);
+  return hits.filter((h) => h.score >= cutoff);
+}
+
 export interface SourceRef {
   n: number; // 1-based reference number, aligned with the inline [#n] citation
   docId: string;

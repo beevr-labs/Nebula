@@ -27,6 +27,8 @@ export interface CreateNoteInput extends NoteDraft {
   id?: string;
   /** Existing vault paths, so the derived slug never collides (FR-NOTE-002). */
   existingPaths?: Iterable<string>;
+  /** Target folder (FR-NOTE-007); defaults to `notes`. May nest, e.g. `clients/acme`. */
+  folder?: string;
   /** Pre-existing / user frontmatter keys to preserve (never clobbered, except title/modified). */
   frontmatter?: Record<string, unknown>;
 }
@@ -62,17 +64,66 @@ export function slugify(title: string): string {
 }
 
 /**
- * Derive a collision-free `notes/<slug>.md` path (FR-NOTE-002). If the base path is already in
- * `existingPaths`, append `-2`, `-3`, … until free, so saving two "Untitled" notes never
- * overwrites the first.
+ * Normalize a user-typed folder into a clean, slug-safe vault-relative directory (FR-NOTE-007).
+ * Each `/`-separated segment is slugified; empties drop out. `"Clients / Acme Inc"` → `clients/acme-inc`.
+ * Returns `''` for a blank/punctuation-only folder so callers can fall back to the default.
  */
-export function notePathFromTitle(title: string, existingPaths: Iterable<string> = []): string {
-  const taken = new Set(existingPaths);
+export function normalizeFolder(folder: string): string {
+  return (folder ?? '')
+    .split('/')
+    .map((seg) => slugify(seg))
+    .filter((seg) => seg && seg !== 'untitled')
+    .join('/');
+}
+
+/**
+ * Derive a collision-free `<folder>/<slug>.md` path (FR-NOTE-002/007). `folder` defaults to
+ * `notes`; a user can nest (`clients/acme`). If the base path is already in `existingPaths`,
+ * append `-2`, `-3`, … until free, so saving two same-named notes never overwrites the first.
+ */
+export function deriveNotePath(
+  title: string,
+  opts: { folder?: string; existingPaths?: Iterable<string> } = {}
+): string {
+  const folder = normalizeFolder(opts.folder ?? 'notes') || 'notes';
+  const taken = new Set(opts.existingPaths ?? []);
   const slug = slugify(title);
-  let candidate = `notes/${slug}.md`;
+  let candidate = `${folder}/${slug}.md`;
   let n = 2;
   while (taken.has(candidate)) {
-    candidate = `notes/${slug}-${n}.md`;
+    candidate = `${folder}/${slug}-${n}.md`;
+    n++;
+  }
+  return candidate;
+}
+
+/** Back-compat shim: `notes/<slug>.md` (folder fixed to `notes`). Prefer `deriveNotePath`. */
+export function notePathFromTitle(title: string, existingPaths: Iterable<string> = []): string {
+  return deriveNotePath(title, { existingPaths });
+}
+
+/**
+ * New collision-free path for MOVING a note to `newFolder` (FR-NOTE-008). The filename (slug) is
+ * preserved — only the directory changes — so the note's *title* and every title-based wikilink to
+ * it stay valid (links resolve by title, not path). Moving to the current folder is a no-op.
+ */
+export function moveNotePath(
+  docId: string,
+  newFolder: string,
+  existingPaths: Iterable<string> = []
+): string {
+  const file = docId.slice(docId.lastIndexOf('/') + 1); // e.g. "apollo.md"
+  const folder = normalizeFolder(newFolder) || 'notes';
+  let candidate = `${folder}/${file}`;
+  if (candidate === docId) return docId; // already there
+  const taken = new Set(existingPaths);
+  taken.delete(docId);
+  const dot = file.lastIndexOf('.');
+  const base = dot > 0 ? file.slice(0, dot) : file;
+  const ext = dot > 0 ? file.slice(dot) : '';
+  let n = 2;
+  while (taken.has(candidate)) {
+    candidate = `${folder}/${base}-${n}${ext}`;
     n++;
   }
   return candidate;
@@ -106,7 +157,10 @@ export async function createNote(input: CreateNoteInput): Promise<NoteFile> {
   // `nebula_hash` (FR-DATA-003) instead of flagging every saved note as "externally changed".
   frontmatter.nebula_hash = await computeNoteHash(serializeNote(note));
 
-  const docId = notePathFromTitle(title, input.existingPaths);
+  const docId = deriveNotePath(title, {
+    folder: input.folder,
+    existingPaths: input.existingPaths
+  });
   return { docId, note, markdown: serializeNote(note) };
 }
 
@@ -143,4 +197,38 @@ export async function updateNote(input: UpdateNoteInput): Promise<NoteFile> {
   frontmatter.nebula_hash = await computeNoteHash(serializeNote(note));
 
   return { docId: input.docId, note, markdown: serializeNote(note) };
+}
+
+export interface RenameNoteInput {
+  /** The note's current path. */
+  docId: string;
+  /** The current on-disk/in-memory `.md` text. */
+  markdown: string;
+  /** The new title — its slug becomes the new filename (folder is preserved). */
+  newTitle: string;
+  /** ISO timestamp for the new `modified` stamp. */
+  now: string;
+  /** Existing vault paths so the new slug never collides (the old path is ignored). */
+  existingPaths?: Iterable<string>;
+}
+
+/**
+ * Rename a note (FR-NOTE-008): change its title AND derive a new `<sameFolder>/<newSlug>.md` path.
+ * Body is preserved; `modified` + `nebula_hash` are re-stamped (via {@link updateNote}). Because
+ * wikilinks resolve by TITLE, the caller must also rewrite inbound `[[OldTitle]]` references
+ * (see `rewriteWikilinkTitle`) and move the note's chunks to the new docId in the index.
+ */
+export async function renameNote(input: RenameNoteInput): Promise<NoteFile> {
+  const slash = input.docId.lastIndexOf('/');
+  const folder = slash >= 0 ? input.docId.slice(0, slash) : 'notes';
+  const updated = await updateNote({
+    docId: input.docId,
+    markdown: input.markdown,
+    title: input.newTitle,
+    now: input.now
+  });
+  const taken = new Set(input.existingPaths ?? []);
+  taken.delete(input.docId);
+  const docId = deriveNotePath(input.newTitle, { folder, existingPaths: taken });
+  return { ...updated, docId };
 }

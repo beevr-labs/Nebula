@@ -85,6 +85,42 @@ export function renderWikilinks(text: string, index: TitleIndex): LinkSegment[] 
   return out;
 }
 
+/**
+ * Rewrite every `[[wikilink]]` whose bare target equals `oldTitle` (case/space-insensitive) so it
+ * points at `newTitle`, preserving any `#heading` and `|alias` (FR-LINK-003). Used on rename so
+ * inbound links don't break when a note's title changes. Returns the new text + whether anything
+ * changed. Links whose target is an *alias* of the note (not its title) are left as-is — they
+ * still resolve through the alias index.
+ */
+export function rewriteWikilinkTitle(
+  text: string,
+  oldTitle: string,
+  newTitle: string
+): { text: string; changed: boolean } {
+  const oldKey = norm(oldTitle);
+  let out = '';
+  let pos = 0;
+  let changed = false;
+  for (const ref of parseWikilinks(text)) {
+    out += text.slice(pos, ref.start);
+    if (norm(ref.target) === oldKey) {
+      const inner = ref.raw.slice(2, -2); // strip "[[" … "]]"
+      const pipe = inner.indexOf('|');
+      const aliasPart = pipe >= 0 ? inner.slice(pipe) : ''; // includes the leading "|"
+      const linkPart = pipe >= 0 ? inner.slice(0, pipe) : inner;
+      const hash = linkPart.indexOf('#');
+      const headingPart = hash >= 0 ? linkPart.slice(hash) : ''; // includes the leading "#"
+      out += `[[${newTitle}${headingPart}${aliasPart}]]`;
+      changed = true;
+    } else {
+      out += ref.raw;
+    }
+    pos = ref.end;
+  }
+  out += text.slice(pos);
+  return { text: out, changed };
+}
+
 export interface WikilinkSuggestion {
   docId: string;
   title: string;

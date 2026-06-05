@@ -14,7 +14,7 @@
   import { intake } from '$lib/ingest/intake';
   import { csvToMarkdown } from '$lib/ingest/csv';
   import { buildProxyNote, proxyNotePath } from '$lib/ingest/proxy';
-  import { createNote, updateNote } from '$lib/vault/note-crud';
+  import { createNote, updateNote, renameNote, moveNotePath } from '$lib/vault/note-crud';
   import { serializeNote } from '$lib/vault/note';
   import {
     resolveTarget,
@@ -22,6 +22,7 @@
     findUnlinkedMentions,
     autocompleteWikilink,
     applyWikilinkChoice,
+    rewriteWikilinkTitle,
     type AutocompleteState
   } from '$lib/weave/wikilink';
   import { renderMarkdown } from '$lib/render/markdown';
@@ -36,7 +37,12 @@
   import { buildFileTree, type TreeNode } from '$lib/nav/tree';
   import { buildTagIndex, notesForTag, coerceTags, extractInlineTags } from '$lib/nav/tags';
   import { scopeDocIds, filterByScope, scopeLabel, type Scope } from '$lib/retrieval/scope';
-  import { dedupeByDoc, referencesFromHits, type SourceRef } from '$lib/retrieval/search';
+  import {
+    dedupeByDoc,
+    referencesFromHits,
+    relevantHits,
+    type SourceRef
+  } from '$lib/retrieval/search';
   import { sourcesFromNotes, sourcesFromHits, parseRedactions } from '$lib/context/sources';
   import { compile } from '$lib/context/compiler';
 
@@ -116,6 +122,7 @@
   let ttft = $state(0);
   let tps = $state(0);
   let coi = $state(false);
+  let modelCached = $state(false); // weights already on disk → fast load, no download (#4)
 
   // Ingestion UI.
   let importMsg = $state('');
@@ -126,6 +133,7 @@
   // Write mode with the subject pre-filled; Ask is the secondary tab.
   let mode = $state<'ask' | 'write'>('write');
   let draftTitle = $state(new Date().toISOString().slice(0, 10));
+  let draftFolder = $state('notes'); // target folder for a NEW note (FR-NOTE-007)
   let draftBody = $state('');
   let editingDocId = $state<string | null>(null); // null → creating a new note
   let editMsg = $state('');
@@ -168,6 +176,7 @@
     ingest: (docId: string, text: string) => Promise<void>;
     removeDoc: (docId: string) => Promise<void>;
     provider: {
+      isCached: (m: string) => Promise<boolean>;
       loadModel: (m: string, cb: (p: number) => void) => Promise<void>;
       generate: (
         req: {
@@ -376,6 +385,7 @@
           title: draftTitle,
           body: draftBody,
           now: nowIso,
+          folder: draftFolder,
           existingPaths: vault.map((n) => n.docId)
         });
       }
@@ -407,6 +417,105 @@
     } finally {
       savingNote = false;
     }
+  }
+
+  /** Re-key a note's chunks in the index from `oldDocId` → `newDocId` (drop stale, re-embed). */
+  async function reindexAs(oldDocId: string, newDocId: string, body: string) {
+    if (!pipe) return;
+    await pipe.removeDoc(oldDocId);
+    await pipe.ingest(newDocId, body);
+  }
+
+  // Delete a note (FR-NOTE-009): remove it from the vault + drop its chunks from the index. Works
+  // for hand-written notes AND proxy notes (the untouched original under sources/ is unaffected).
+  async function deleteNote(docId: string) {
+    if (!pipe || !ready) return;
+    if (!confirm(`Delete ${docId}?\nThis removes it from the vault and the search index.`)) return;
+    await pipe.removeDoc(docId);
+    vault = vault.filter((n) => n.docId !== docId);
+    if (activeDoc === docId) {
+      activeDoc = null;
+      activeSpan = null;
+    }
+    if (editingDocId === docId) {
+      editingDocId = null;
+      draftTitle = today();
+      draftBody = '';
+    }
+    editMsg = `🗑 deleted ${docId}`;
+  }
+
+  // Rename a note (FR-NOTE-008): change its title + path, re-index under the new docId, AND rewrite
+  // every inbound `[[OldTitle]]` wikilink in the rest of the vault so no link breaks (links resolve
+  // by title). Each note whose body changes is re-embedded so retrieval stays consistent.
+  async function renameNoteAction(note: Note) {
+    if (!pipe || !ready) return;
+    const oldTitle = note.title;
+    const next = prompt('Rename note — new title:', oldTitle);
+    if (next === null) return;
+    const newTitle = next.trim();
+    if (!newTitle || newTitle === oldTitle) return;
+    const nowIso = new Date().toISOString();
+    const md = serializeNote({
+      frontmatter: note.frontmatter ?? { title: note.title },
+      body: note.text
+    });
+    const file = await renameNote({
+      docId: note.docId,
+      markdown: md,
+      newTitle,
+      now: nowIso,
+      existingPaths: vault.map((n) => n.docId)
+    });
+    const newTitleStr = String(file.note.frontmatter.title);
+    await reindexAs(note.docId, file.docId, note.text);
+
+    // Rewrite inbound [[oldTitle]] links across every other note; re-index the ones that changed.
+    const rewrites = new Map<string, string>();
+    for (const other of vault) {
+      if (other.docId === note.docId) continue;
+      const r = rewriteWikilinkTitle(other.text, oldTitle, newTitleStr);
+      if (r.changed) rewrites.set(other.docId, r.text);
+    }
+    for (const [docId, body] of rewrites) await reindexAs(docId, docId, body);
+
+    vault = vault
+      .filter((n) => n.docId !== note.docId)
+      .map((n) => (rewrites.has(n.docId) ? { ...n, text: rewrites.get(n.docId)! } : n))
+      .concat([
+        {
+          docId: file.docId,
+          title: newTitleStr,
+          aliases: note.aliases ?? [],
+          text: note.text,
+          kind: note.kind,
+          sourcePath: note.sourcePath,
+          frontmatter: file.note.frontmatter
+        }
+      ]);
+    if (activeDoc === note.docId) activeDoc = file.docId;
+    if (editingDocId === note.docId) editingDocId = file.docId;
+    editMsg = `✓ renamed → ${file.docId}${rewrites.size ? ` (rewrote ${rewrites.size} link${rewrites.size > 1 ? 's' : ''})` : ''}`;
+  }
+
+  // Move a note to another folder (FR-NOTE-008): the filename (slug) and title are unchanged, so
+  // title-based wikilinks keep resolving — only the docId/path changes, re-keyed in the index.
+  async function moveNoteAction(note: Note) {
+    if (!pipe || !ready) return;
+    const currentFolder = note.docId.slice(0, note.docId.lastIndexOf('/')) || 'notes';
+    const next = prompt('Move note — destination folder:', currentFolder);
+    if (next === null) return;
+    const newDocId = moveNotePath(
+      note.docId,
+      next,
+      vault.map((n) => n.docId)
+    );
+    if (newDocId === note.docId) return;
+    await reindexAs(note.docId, newDocId, note.text);
+    vault = vault.filter((n) => n.docId !== note.docId).concat([{ ...note, docId: newDocId }]);
+    if (activeDoc === note.docId) activeDoc = newDocId;
+    if (editingDocId === note.docId) editingDocId = newDocId;
+    editMsg = `✓ moved → ${newDocId}`;
   }
 
   // Insert a template into the editor body (FR-NOTE-006), expanding {{date}}/{{title}}/… for now.
@@ -465,9 +574,13 @@
       // Scoped retrieval (FR-RET-004): over-fetch then keep only in-scope hits so a question
       // about one client never pulls another client's notes (no cross-client bleed).
       const raw = filterByScope(await pipe.search(qv, scope ? 24 : 12), scopeIds);
+      // Precision pass on the over-fetch (ADR-018): drop the low-score tail so References,
+      // Micro-Map, and the grounded context carry only genuinely relevant notes — a 0.31 cosine
+      // hit is noise the small model would otherwise be asked to reconcile (FR-CHAT-002).
+      const relevant = relevantHits(raw);
       // Favor BREADTH across distinct relevant documents (FR-CHAT-002): one best chunk per doc,
       // up to 5 docs — so the answer synthesizes several notes at once and can reference them all.
-      hits = dedupeByDoc(raw, 5);
+      hits = dedupeByDoc(relevant, 5);
       references = referencesFromHits(hits);
       // Micro-Map (FR-GRAPH-001) + persist the retrieval sub-graph edges (FR-GRAPH-002).
       graph = buildMicroGraph(query, hits);
@@ -478,12 +591,18 @@
       }
 
       if (loadedModel !== modelId) {
-        status = 'loading model…';
+        // Tell the user whether this is the one-time download or a fast load from cache, so the
+        // wait is never a mystery (the cache check itself is best-effort).
+        modelCached = await pipe.provider.isCached(modelId).catch(() => false);
+        const verb = modelCached ? 'loading cached model' : 'first run — downloading model once';
+        status = `${verb}…`;
         await pipe.provider.loadModel(
           modelId,
-          (p) => (status = `loading model ${(p * 100).toFixed(0)}%`)
+          (p) =>
+            (status = `${modelCached ? 'loading' : 'downloading'} model ${(p * 100).toFixed(0)}%`)
         );
         loadedModel = modelId;
+        modelCached = true; // it's in cache now, regardless of where it started
       }
 
       status = 'generating…';
@@ -833,8 +952,9 @@
             <span>
               {status}
               {#if /model/i.test(status)}<br /><small
-                  >First run downloads the model once (~hundreds of MB), then it's cached — later
-                  runs are fast.</small
+                  >{modelCached
+                    ? 'Loading the cached model from disk — no download.'
+                    : "First run downloads the model once (~hundreds of MB), then it's cached — later runs are fast."}</small
                 >{/if}
             </span>
           </div>
@@ -944,6 +1064,15 @@
               placeholder="Note title"
               disabled={savingNote}
             />
+            {#if !editingDocId}
+              <input
+                class="folder-input"
+                bind:value={draftFolder}
+                placeholder="folder"
+                title="Folder (e.g. clients/acme) — created on save"
+                disabled={savingNote}
+              />
+            {/if}
             <select
               class="tpl-select"
               disabled={savingNote}
@@ -1070,10 +1199,17 @@
         <div class="block-h">
           {activeNote.docId}{activeSpan ? ' · cited span highlighted' : ''}
           {#if activeNote.kind}<span class="badge">{activeNote.kind}</span>{/if}
-          {#if !activeNote.sourcePath}
-            <button class="back edit" onclick={() => editNote(activeNote)}>✎ Edit</button>
-          {/if}
-          <button class="back" onclick={() => (activeDoc = null)}>✕ vault</button>
+          <span class="note-actions">
+            {#if !activeNote.sourcePath}
+              <button class="back edit" onclick={() => editNote(activeNote)}>✎ Edit</button>
+              <button class="back" onclick={() => renameNoteAction(activeNote)}>✏️ Rename</button>
+            {/if}
+            <button class="back" onclick={() => moveNoteAction(activeNote)}>📂 Move</button>
+            <button class="back danger" onclick={() => deleteNote(activeNote.docId)}
+              >🗑 Delete</button
+            >
+            <button class="back" onclick={() => (activeDoc = null)}>✕ vault</button>
+          </span>
         </div>
         {#if activeNote.sourcePath}
           <div class="source-link">
@@ -1870,6 +2006,15 @@
     font-size: 1rem;
     font-weight: 600;
   }
+  .folder-input {
+    width: 9rem;
+    box-sizing: border-box;
+    border: 1px solid #d8d8e0;
+    border-radius: 8px;
+    padding: 0.5rem 0.6rem;
+    font-size: 0.82rem;
+    color: #555;
+  }
   .tpl-select {
     border: 1px solid #d8d8e0;
     border-radius: 8px;
@@ -1925,13 +2070,22 @@
     color: #6750a4;
     border: 1px solid #d9cef2;
   }
-  .back.edit {
+  .note-actions {
     margin-left: auto;
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+  .note-actions .back {
+    margin-left: 0;
+  }
+  .back.edit {
     color: #6750a4;
     background: #efeaf8;
   }
-  .back.edit + .back {
-    margin-left: 0.4rem;
+  .back.danger {
+    color: #b3261e;
+    background: #fce8e6;
   }
   .body-wrap {
     position: relative;

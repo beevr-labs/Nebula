@@ -14,6 +14,16 @@ import {
 
 const MAX_CONTEXT_TOKENS = 4096;
 
+// Persist model weights in IndexedDB (same storage family as the SurrealDB `indxdb://` vector
+// store) rather than the default Cache API. IndexedDB is less prone to eviction and behaves
+// consistently inside the Tauri webview, so a model downloaded once is reused on every later run
+// (NFR-PERF). Re-downloads only happen if the browser/OS clears site data or the origin changes
+// (e.g. a different dev-server port) — the packaged app has a stable origin (ADR-019).
+const APP_CONFIG: webllm.AppConfig = {
+  ...webllm.prebuiltAppConfig,
+  cacheBackend: 'indexeddb'
+};
+
 export class WebLLMProvider implements InferenceProvider {
   readonly id = 'webllm' as const;
   private engine: webllm.MLCEngineInterface | null = null;
@@ -22,8 +32,18 @@ export class WebLLMProvider implements InferenceProvider {
     return { chat: true, maxContextTokens: MAX_CONTEXT_TOKENS, backend: 'webgpu' };
   }
 
+  /** True if this model's weights are already cached locally — no download needed (FR-MDL). */
+  async isCached(modelId: string): Promise<boolean> {
+    try {
+      return await webllm.hasModelInCache(modelId, APP_CONFIG);
+    } catch {
+      return false;
+    }
+  }
+
   async loadModel(modelId: string, onProgress: (p: number) => void): Promise<void> {
     this.engine = await webllm.CreateMLCEngine(modelId, {
+      appConfig: APP_CONFIG,
       initProgressCallback: (r: webllm.InitProgressReport) => onProgress(r.progress ?? 0)
     });
   }

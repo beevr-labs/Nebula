@@ -8,11 +8,31 @@ import {
   applyWikilinkChoice,
   buildBacklinks,
   findUnlinkedMentions,
+  rewriteWikilinkTitle,
   type NoteBody
 } from '../../src/lib/weave/wikilink';
 import { buildTitleIndex } from '../../src/lib/weave/weaver';
 
 // FR-LINK-003/004/005 · OBSIDIAN-DNA §5.7. Manual wikilink authoring + backlinks.
+
+describe('rewriteWikilinkTitle', () => {
+  it('rewrites a bare target, preserving heading and alias', () => {
+    const a = rewriteWikilinkTitle('see [[Old]] and [[Old#Setup]]', 'Old', 'New');
+    expect(a).toEqual({ text: 'see [[New]] and [[New#Setup]]', changed: true });
+    const b = rewriteWikilinkTitle('[[Old|the project]]', 'Old', 'New');
+    expect(b.text).toBe('[[New|the project]]');
+  });
+  it('is case/space-insensitive on the target and leaves other links alone', () => {
+    const r = rewriteWikilinkTitle('[[ old ]] [[Other]]', 'OLD', 'New');
+    expect(r).toEqual({ text: '[[New]] [[Other]]', changed: true });
+  });
+  it('reports no change when nothing matches', () => {
+    expect(rewriteWikilinkTitle('[[Other]]', 'Old', 'New')).toEqual({
+      text: '[[Other]]',
+      changed: false
+    });
+  });
+});
 
 const NOTES: NoteBody[] = [
   {

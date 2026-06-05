@@ -2,6 +2,10 @@ import { describe, it, expect } from 'vitest';
 import {
   slugify,
   notePathFromTitle,
+  normalizeFolder,
+  deriveNotePath,
+  moveNotePath,
+  renameNote,
   validateDraft,
   createNote,
   updateNote
@@ -26,6 +30,93 @@ describe('slugify', () => {
     expect(slugify('')).toBe('untitled');
     expect(slugify('!!!')).toBe('untitled');
     expect(slugify('   ')).toBe('untitled');
+  });
+});
+
+describe('normalizeFolder', () => {
+  it('slugifies each segment and keeps nesting', () => {
+    expect(normalizeFolder('Clients / Acme Inc')).toBe('clients/acme-inc');
+    expect(normalizeFolder('Đánh giá')).toBe('danh-gia');
+  });
+  it('returns empty for a blank/punctuation-only folder', () => {
+    expect(normalizeFolder('')).toBe('');
+    expect(normalizeFolder('  /  ')).toBe('');
+  });
+});
+
+describe('deriveNotePath', () => {
+  it('honors a (nested) folder and defaults to notes/', () => {
+    expect(deriveNotePath('My Note')).toBe('notes/my-note.md');
+    expect(deriveNotePath('My Note', { folder: 'Clients/Acme' })).toBe('clients/acme/my-note.md');
+  });
+  it('suffixes within the chosen folder on collision', () => {
+    expect(deriveNotePath('Note', { folder: 'clients', existingPaths: ['clients/note.md'] })).toBe(
+      'clients/note-2.md'
+    );
+  });
+});
+
+describe('moveNotePath', () => {
+  it('keeps the filename, changes only the folder', () => {
+    expect(moveNotePath('notes/apollo.md', 'clients/acme')).toBe('clients/acme/apollo.md');
+  });
+  it('is a no-op when already in the target folder', () => {
+    expect(moveNotePath('notes/apollo.md', 'notes')).toBe('notes/apollo.md');
+  });
+  it('suffixes the stem on a name clash in the destination', () => {
+    expect(moveNotePath('notes/apollo.md', 'clients', ['clients/apollo.md'])).toBe(
+      'clients/apollo-2.md'
+    );
+  });
+});
+
+describe('renameNote', () => {
+  it('changes the title + path (same folder) and re-stamps the hash', async () => {
+    const created = await createNote({
+      title: 'Old Name',
+      body: 'hello',
+      now: '2026-06-06T00:00:00Z'
+    });
+    const renamed = await renameNote({
+      docId: created.docId,
+      markdown: created.markdown,
+      newTitle: 'New Name',
+      now: '2026-06-07T00:00:00Z'
+    });
+    expect(created.docId).toBe('notes/old-name.md');
+    expect(renamed.docId).toBe('notes/new-name.md');
+    expect(renamed.note.frontmatter.title).toBe('New Name');
+    expect(renamed.note.frontmatter.modified).toBe('2026-06-07T00:00:00Z');
+    // hash stays honest: re-reading the file reproduces nebula_hash (FR-DATA-003).
+    expect(renamed.note.frontmatter.nebula_hash).toBe(await computeNoteHash(renamed.markdown));
+  });
+
+  it('preserves the original folder when renaming a moved note', async () => {
+    const created = await createNote({
+      title: 'Spec',
+      body: 'x',
+      now: '2026-06-06T00:00:00Z',
+      folder: 'clients/acme'
+    });
+    const renamed = await renameNote({
+      docId: created.docId,
+      markdown: created.markdown,
+      newTitle: 'Spec v2',
+      now: '2026-06-06T00:00:00Z'
+    });
+    expect(renamed.docId).toBe('clients/acme/spec-v2.md');
+  });
+});
+
+describe('createNote (folder)', () => {
+  it('writes into the requested folder', async () => {
+    const f = await createNote({
+      title: 'Brief',
+      body: '',
+      now: '2026-06-06T00:00:00Z',
+      folder: 'Clients/Globex'
+    });
+    expect(f.docId).toBe('clients/globex/brief.md');
   });
 });
 
