@@ -35,6 +35,9 @@
   } from '$lib/vault/template';
   import { buildFileTree, type TreeNode } from '$lib/nav/tree';
   import { buildTagIndex, notesForTag, coerceTags, extractInlineTags } from '$lib/nav/tags';
+  import { scopeDocIds, filterByScope, scopeLabel, type Scope } from '$lib/retrieval/scope';
+  import { sourcesFromNotes, sourcesFromHits, parseRedactions } from '$lib/context/sources';
+  import { compile } from '$lib/context/compiler';
 
   type Note = {
     docId: string;
@@ -137,6 +140,17 @@
 
   // Live Markdown preview (FR-UI-002 · §5.10).
   let previewOn = $state(true);
+
+  // Retrieval scope (FR-RET-004) — restrict Ask + Compile to one client (folder/tag).
+  let scope = $state<Scope | null>(null);
+
+  // Context Compiler UI (FR-CTX-*) — compact, token-counted share to another LLM.
+  const COMPILE_MODELS = ['gpt-4o', 'gpt-4', 'claude-sonnet', 'claude-opus'];
+  let compileOpen = $state(false);
+  let compileModel = $state('claude-sonnet');
+  let compileRedact = $state('');
+  let compileSources = $state<ReturnType<typeof sourcesFromNotes>>([]);
+  let compileFrom = $state<'scope' | 'answer'>('scope');
 
   // 40/60 resizable split (FR-UI-001).
   let leftPct = $state(40);
@@ -438,8 +452,11 @@
     try {
       status = 'embedding query…';
       const qv = await pipe.embed(query);
-      status = 'retrieving…';
-      hits = await pipe.search(qv, 4);
+      status = scope ? `retrieving (scoped: ${scopeLabel(scope)})…` : 'retrieving…';
+      // Scoped retrieval (FR-RET-004): over-fetch then keep only in-scope hits so a question
+      // about one client never pulls another client's notes (no cross-client bleed).
+      const raw = await pipe.search(qv, scope ? 24 : 4);
+      hits = filterByScope(raw, scopeIds).slice(0, 4);
       // Micro-Map (FR-GRAPH-001) + persist the retrieval sub-graph edges (FR-GRAPH-002).
       graph = buildMicroGraph(query, hits);
       try {
@@ -630,6 +647,71 @@
   function toggleTag(tag: string) {
     activeTag = activeTag === tag ? null : tag;
   }
+
+  // --- Retrieval scope (FR-RET-004) ----------------------------------------
+  const scopeNotes = $derived(taggedVault.map((n) => ({ docId: n.docId, tags: n.tags })));
+  const scopeIds = $derived(scopeDocIds(scopeNotes, scope));
+  // Distinct folder prefixes + tags, as selectable scopes.
+  const folderScopes = $derived.by(() => {
+    const set = new Set<string>();
+    for (const n of vault) {
+      const parts = n.docId.split('/');
+      parts.pop();
+      let p = '';
+      for (const seg of parts) {
+        p = p ? `${p}/${seg}` : seg;
+        set.add(`${p}/`);
+      }
+    }
+    return [...set].sort();
+  });
+  function setScope(value: string) {
+    if (!value) scope = null;
+    else if (value.startsWith('folder:')) scope = { kind: 'folder', value: value.slice(7) };
+    else scope = { kind: 'tag', value: value.slice(4) };
+  }
+
+  // --- Context Compiler (FR-CTX-*) -----------------------------------------
+  const hashOfDoc = (docId: string): string =>
+    String(vault.find((n) => n.docId === docId)?.frontmatter?.nebula_hash ?? '');
+  const compileResult = $derived(
+    compileOpen && compileSources.length
+      ? compile({
+          sources: compileSources,
+          targetModel: compileModel,
+          redactions: parseRedactions(compileRedact)
+        })
+      : null
+  );
+  function openCompileFromScope() {
+    const inScope = scopeIds ? vault.filter((n) => scopeIds.has(n.docId)) : vault;
+    compileSources = sourcesFromNotes(
+      inScope.map((n) => ({ docId: n.docId, text: n.text, hash: hashOfDoc(n.docId) }))
+    );
+    compileFrom = 'scope';
+    compileOpen = true;
+  }
+  function openCompileFromHits() {
+    if (!hits.length) return;
+    compileSources = sourcesFromHits(
+      hits.map((h) => ({ chunkId: h.chunkId, docId: h.docId, text: h.text, page: h.page })),
+      hashOfDoc
+    );
+    compileFrom = 'answer';
+    compileOpen = true;
+  }
+  async function copyCompiled() {
+    if (compileResult) await navigator.clipboard.writeText(compileResult.xml);
+  }
+  function downloadCompiled() {
+    if (!compileResult) return;
+    const url = URL.createObjectURL(new Blob([compileResult.xml], { type: 'application/xml' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'nebula-context.xml';
+    a.click();
+    URL.revokeObjectURL(url);
+  }
   function onGlobalKey(e: KeyboardEvent) {
     if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'o')) {
       e.preventDefault();
@@ -686,13 +768,47 @@
           <select bind:value={modelId} disabled={busy}>
             {#each MODELS as m (m.id)}<option value={m.id}>{m.label}</option>{/each}
           </select>
+          <select
+            class="scope-select"
+            value={scope
+              ? scope.kind === 'folder'
+                ? `folder:${scope.value}`
+                : `tag:${scope.value}`
+              : ''}
+            disabled={busy}
+            title="Restrict Ask + Compile to one client (folder or tag) — no cross-client bleed"
+            onchange={(e) => setScope(e.currentTarget.value)}
+          >
+            <option value="">🎯 Whole vault</option>
+            {#if folderScopes.length}
+              <optgroup label="Folders">
+                {#each folderScopes as f (f)}<option value={`folder:${f}`}>📁 {f}</option>{/each}
+              </optgroup>
+            {/if}
+            {#if tagIndex.length}
+              <optgroup label="Tags">
+                {#each tagIndex as t (t.tag)}<option value={`tag:${t.tag}`}>#{t.tag}</option>{/each}
+              </optgroup>
+            {/if}
+          </select>
         </div>
 
         <textarea bind:value={query} rows="2" placeholder="Ask a question…" disabled={busy}
         ></textarea>
-        <button class="ask" onclick={ask} disabled={!ready || busy}
-          >{busy ? 'Working…' : 'Ask'}</button
-        >
+        <div class="ask-row">
+          <button class="ask" onclick={ask} disabled={!ready || busy}
+            >{busy ? 'Working…' : 'Ask'}</button
+          >
+          <button
+            class="ghost"
+            onclick={openCompileFromScope}
+            disabled={!ready}
+            title="Compile {scope
+              ? scopeLabel(scope)
+              : 'the whole vault'} into a compact, token-counted payload for another LLM (GPT/Claude)"
+            >📦 Compile {scope ? 'scope' : 'vault'}</button
+          >
+        </div>
 
         {#if hits.length}
           <div class="sources">
@@ -764,6 +880,14 @@
                   <button class="chip" onclick={() => jumpTo(c.chunkId)}>[#{c.n}] {c.docId}</button>
                 {/each}
               </div>
+            {/if}
+            {#if hits.length}
+              <button
+                class="ghost compile-ctx"
+                onclick={openCompileFromHits}
+                title="Compile just the retrieved context (the relevant ~5%) for another LLM"
+                >📦 Compile this context →</button
+              >
             {/if}
           </div>
         {/if}
@@ -1053,6 +1177,65 @@
             <li class="switcher-empty">No matching notes</li>
           {/each}
         </ul>
+      </div>
+    </div>
+  {/if}
+
+  {#if compileOpen}
+    <!-- Context Compiler (FR-CTX-*): compact, token-counted share to another LLM. -->
+    <div
+      class="switcher-overlay"
+      role="button"
+      tabindex="-1"
+      aria-label="Close compiler"
+      onclick={() => (compileOpen = false)}
+      onkeydown={(e) => e.key === 'Escape' && (compileOpen = false)}
+    >
+      <div
+        class="compiler"
+        role="dialog"
+        tabindex="-1"
+        aria-label="Context Compiler"
+        onclick={(e) => e.stopPropagation()}
+        onkeydown={(e) => e.key === 'Escape' && (compileOpen = false)}
+      >
+        <div class="compiler-head">
+          <strong>📦 Share to another LLM</strong>
+          <span class="compiler-sub"
+            >{compileFrom === 'answer' ? 'retrieved context' : 'scope'}: {compileSources.length} source(s){scope
+              ? ` · ${scopeLabel(scope)}`
+              : ''}</span
+          >
+          <button class="back" onclick={() => (compileOpen = false)}>✕</button>
+        </div>
+        <div class="compiler-controls">
+          <label>
+            Target model
+            <select bind:value={compileModel}>
+              {#each COMPILE_MODELS as m (m)}<option value={m}>{m}</option>{/each}
+            </select>
+          </label>
+          <label class="redact">
+            Redact (comma-separated)
+            <input bind:value={compileRedact} placeholder="Acme, John Doe, 555-…" />
+          </label>
+        </div>
+        {#if compileResult}
+          <div class="compiler-meta">
+            ~<strong>{compileResult.manifest.tokenCount}</strong> tokens · tokenizer
+            {compileResult.manifest.tokenizer} ·
+            <span class="consent"
+              >⚠ {compileSources.length} source(s) will leave the device when you copy/paste</span
+            >
+          </div>
+          <textarea class="compiler-xml" readonly rows="14" value={compileResult.xml}></textarea>
+          <div class="compiler-actions">
+            <button class="ask" onclick={copyCompiled}>⧉ Copy</button>
+            <button class="ghost" onclick={downloadCompiled}>⤓ Download .xml</button>
+          </div>
+        {:else}
+          <div class="compiler-meta">Nothing to compile.</div>
+        {/if}
       </div>
     </div>
   {/if}
@@ -1350,6 +1533,97 @@
   }
   .controls {
     margin-bottom: 0.5rem;
+    display: flex;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+  }
+  .scope-select {
+    border: 1px solid #d8d8e0;
+    border-radius: 8px;
+    padding: 0.3rem 0.4rem;
+    font-size: 0.8rem;
+    color: #6750a4;
+    background: #fff;
+    cursor: pointer;
+    max-width: 100%;
+  }
+  .ask-row {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .compile-ctx {
+    margin-top: 0.7rem;
+  }
+  .compiler {
+    width: min(720px, 94vw);
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 12px 48px #0004;
+    padding: 0.9rem 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+  .compiler-head {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+  }
+  .compiler-sub {
+    font-size: 0.76rem;
+    color: #8a8a90;
+  }
+  .compiler-head .back {
+    margin-left: auto;
+  }
+  .compiler-controls {
+    display: flex;
+    gap: 0.8rem;
+    flex-wrap: wrap;
+    font-size: 0.76rem;
+    color: #6a6a72;
+  }
+  .compiler-controls label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+  .compiler-controls .redact {
+    flex: 1;
+    min-width: 180px;
+  }
+  .compiler-controls select,
+  .compiler-controls input {
+    border: 1px solid #d8d8e0;
+    border-radius: 7px;
+    padding: 0.3rem 0.45rem;
+    font: inherit;
+    font-size: 0.82rem;
+  }
+  .compiler-meta {
+    font-size: 0.78rem;
+    color: #5a5a62;
+  }
+  .consent {
+    color: #9a5a00;
+  }
+  .compiler-xml {
+    width: 100%;
+    box-sizing: border-box;
+    border: 1px solid #e4e4ea;
+    border-radius: 8px;
+    padding: 0.5rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.76rem;
+    line-height: 1.45;
+    background: #fbfbfd;
+    resize: vertical;
+  }
+  .compiler-actions {
+    display: flex;
+    gap: 0.5rem;
   }
   select,
   textarea,

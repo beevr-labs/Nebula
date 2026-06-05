@@ -70,6 +70,11 @@ export const BUILTIN_TEMPLATES: NoteTemplate[] = [
     id: 'idea',
     label: 'Idea',
     body: '# {{title}}\n\n**Captured:** {{datetime}}\n\n## Summary\n\n## Why it matters\n\n## Next step\n- [ ] '
+  },
+  {
+    id: 'decision',
+    label: 'Decision log',
+    body: '# Decision: {{title}}\n\n**Date:** {{date}}\n**Owner:** \n**Status:** decided\n\n## Context\n\n## Decision\n\n## Alternatives considered\n- \n\n## Consequences\n- '
   }
 ];
 

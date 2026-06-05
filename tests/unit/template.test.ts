@@ -42,6 +42,16 @@ describe('expandTemplate', () => {
       expandTemplate(body, { now, title: 'Sync' })
     );
   });
+
+  it('ships a Decision-log template that expands title + date', () => {
+    const dec = BUILTIN_TEMPLATES.find((t) => t.id === 'decision');
+    expect(dec).toBeDefined();
+    const body = expandTemplate(dec!.body, { now, title: 'Use Postgres' });
+    expect(body).toContain('# Decision: Use Postgres');
+    expect(body).toContain('**Date:** 2026-06-06');
+    expect(body).toContain('## Consequences');
+    expect(body).not.toContain('{{');
+  });
 });
 
 describe('daily notes', () => {
