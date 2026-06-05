@@ -14,15 +14,13 @@ import {
 
 const MAX_CONTEXT_TOKENS = 4096;
 
-// Persist model weights in IndexedDB (same storage family as the SurrealDB `indxdb://` vector
-// store) rather than the default Cache API. IndexedDB is less prone to eviction and behaves
-// consistently inside the Tauri webview, so a model downloaded once is reused on every later run
-// (NFR-PERF). Re-downloads only happen if the browser/OS clears site data or the origin changes
-// (e.g. a different dev-server port) — the packaged app has a stable origin (ADR-019).
-const APP_CONFIG: webllm.AppConfig = {
-  ...webllm.prebuiltAppConfig,
-  cacheBackend: 'indexeddb'
-};
+// Persist model weights in WebLLM's default Cache Storage (ADR-025, supersedes ADR-020's
+// IndexedDB choice). Live evidence: a 695 MB chat model survived many sessions in `webllm/model`
+// Cache Storage on the fixed-port origin — persistence was never the cache *backend*, it was the
+// origin (a changing dev-server port orphaned the cache; `strictPort: 1420` fixes that, and the
+// packaged Tauri app has a stable origin). Forcing IndexedDB would orphan that Cache-Storage copy
+// and trigger one needless re-download. So we keep the default and rely on the stable origin.
+const APP_CONFIG: webllm.AppConfig = webllm.prebuiltAppConfig;
 
 export class WebLLMProvider implements InferenceProvider {
   readonly id = 'webllm' as const;
