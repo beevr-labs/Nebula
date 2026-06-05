@@ -91,7 +91,7 @@ describe('TC-CHAT — grounded, cited answer via the mock provider', () => {
     const req: GenerateRequest = {
       requestId: 'r2',
       query: 'q',
-      context: corpus,
+      context: vectorSearch([1, 0], corpus, { k: 1 }),
       modelId: 'mock-model',
       maxTokens: 64
     };
