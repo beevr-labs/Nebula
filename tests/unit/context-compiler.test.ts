@@ -148,3 +148,49 @@ describe('manifest sources', () => {
     ]);
   });
 });
+
+describe('Context Compiler — CE2 task-aware payload (FR-CTX-009)', () => {
+  it('is byte-identical to a task-less compile when no task is supplied', () => {
+    const withoutTask = compile(baseInput, () => 'x').xml;
+    const explicitlyNoTask = compile({ ...baseInput, task: undefined }, () => 'x').xml;
+    expect(withoutTask).toBe(explicitlyNoTask);
+    expect(withoutTask).not.toContain('<task>');
+  });
+
+  it('leads with the question + cite-by-path#seq directive when a task is supplied', () => {
+    const { xml } = compile(
+      { ...baseInput, task: { question: 'When does Project X ship?' } },
+      () => 'x'
+    );
+    expect(xml).toContain('<task>');
+    expect(xml).toContain('<question>When does Project X ship?</question>');
+    expect(xml).toContain('[path#seq]'); // the directive tells the model how to cite
+    // The task block precedes the sources (paste-and-go order).
+    expect(xml.indexOf('<task>')).toBeLessThan(xml.indexOf('<source'));
+  });
+
+  it('still produces byte-identical output for identical task inputs (determinism preserved)', () => {
+    const input = { ...baseInput, task: { question: 'Ship date?' } };
+    expect(compile(input, () => 'a').xml).toBe(compile(input, () => 'b').xml);
+  });
+
+  it('escapes the question (no XML injection from user text)', () => {
+    const { xml } = compile(
+      { ...baseInput, task: { question: 'Why <urgent> & "risky"?' } },
+      () => 'x'
+    );
+    expect(xml).toContain('Why &lt;urgent&gt; &amp; "risky"?');
+    expect(xml).not.toContain('<urgent>');
+  });
+});
+
+describe('Context Compiler — CE5 cost in the manifest (FR-CTX-011)', () => {
+  it('reports context-window fit + estimated cost for the target model', () => {
+    const { manifest } = compile(baseInput, () => 'x'); // gpt-4o
+    expect(manifest.cost.known).toBe(true);
+    expect(manifest.cost.contextWindow).toBe(128_000);
+    expect(manifest.cost.fitsWindow).toBe(true);
+    expect(manifest.cost.tokens).toBe(manifest.tokenCount);
+    expect(manifest.cost.estInputCostUSD).toBeGreaterThanOrEqual(0);
+  });
+});

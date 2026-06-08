@@ -10,6 +10,7 @@
 
 import { encode as encodeCl100k } from 'gpt-tokenizer/encoding/cl100k_base';
 import { encode as encodeO200k } from 'gpt-tokenizer/encoding/o200k_base';
+import { costReport, type CostReport } from './cost';
 
 export interface CompileChunk {
   seq: number;
@@ -25,11 +26,22 @@ export interface CompileSource {
   chunks: CompileChunk[];
 }
 
+export interface CompileTask {
+  question: string; // the actual question to put in front of the cloud model
+}
+
 export interface CompileInput {
   sources: CompileSource[];
   targetModel: string; // selects the tokenizer (FR-CTX-003)
   redactions?: { pattern: string }[]; // FR-CTX-005 — applied BEFORE serialization
+  task?: CompileTask; // FR-CTX-009 (CE2) — make the payload paste-and-go; omit → byte-identical to before
 }
+
+// CE2 directive: tells the cloud model to answer from the sources and cite by `path#seq`, which is the
+// exact addressing Magic Jump round-trips back to vault locations (FR-CTX-010 / CE4). Versioned constant
+// so the payload stays byte-identical for a fixed input.
+export const CITE_DIRECTIVE =
+  "Answer the question using ONLY the sources below. After each claim, cite the source it came from as [path#seq] — the source's path and the chunk's seq — e.g. [notes/budget.md#0]. Do not use outside knowledge.";
 
 export interface CompileResult {
   xml: string;
@@ -37,6 +49,7 @@ export interface CompileResult {
     sources: { path: string; hash: string }[];
     tokenCount: number; // via the target tokenizer, ±5% (FR-CTX-003)
     tokenizer: string; // named, e.g. 'cl100k_base'
+    cost: CostReport; // CE5 (FR-CTX-011) — context-window fit + estimated input cost for the target model
     generatedAt: string; // ONLY non-deterministic field; never appears in `xml`
   };
 }
@@ -115,6 +128,15 @@ export function compile(
 
   // 2. Serialize deterministically (2-space indent, fixed structure).
   const lines: string[] = ['<context generated_by="nebula" version="2.0">'];
+  // CE2 (FR-CTX-009): when a task is supplied, lead with the question + the cite-by-path#seq directive
+  // so the payload is paste-and-go. Emitted ONLY when present, so a task-less compile is byte-identical
+  // to before (FR-CTX-002 — the existing determinism tests are unaffected).
+  if (input.task) {
+    lines.push('  <task>');
+    lines.push(`    <question>${escapeText(input.task.question)}</question>`);
+    lines.push(`    <directive>${escapeText(CITE_DIRECTIVE)}</directive>`);
+    lines.push('  </task>');
+  }
   for (const src of orderedSources) {
     lines.push(`  <source path="${escapeAttr(src.path)}" hash="${escapeAttr(src.hash)}">`);
     for (const chunk of src.chunks) {
@@ -137,6 +159,7 @@ export function compile(
       sources: orderedSources.map((s) => ({ path: s.path, hash: s.hash })),
       tokenCount,
       tokenizer,
+      cost: costReport(tokenCount, input.targetModel),
       generatedAt: now()
     }
   };
