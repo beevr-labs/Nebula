@@ -24,7 +24,7 @@
       "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' https://huggingface.co https://*.hf.co https://raw.githubusercontent.com; worker-src 'self' blob:",
       "headers": {
         "Cross-Origin-Opener-Policy": "same-origin",
-        "Cross-Origin-Embedder-Policy": "require-corp"
+        "Cross-Origin-Embedder-Policy": "credentialless"
       }
     }
   },

@@ -49,9 +49,12 @@ export interface InferenceProvider {
   unload(): Promise<void>;
 }
 
-// Phase 1 default model IDs (DEPENDENCIES.lock §3 — confirm against webllm.prebuiltAppConfig).
+// Legacy RAM-baseline model ids — they feed the capability OOM-spec map (`capability.ts`) and the persisted
+// `settings.activeModel` default. The LIVE chat picker, best-model recommendation, and OOM gating live in
+// `inference/catalog.ts` (ADR-022/029/030); the app's start default is Llama-3.2-1B. Both ids below are real
+// entries in that catalog. (Earlier ADR-007 framing: Phi-3-mini default / Llama-3.1-8B opt-in.)
 export const DEFAULT_CHAT_MODEL = 'Phi-3-mini-4k-instruct-q4f16_1-MLC';
-export const OPTIONAL_CHAT_MODEL = 'Llama-3-8B-Instruct-q4f16_1-MLC';
+export const OPTIONAL_CHAT_MODEL = 'Llama-3.1-8B-Instruct-q4f16_1-MLC';
 // Multilingual embedder (ADR-021): `bge-m3` (XLM-RoBERTa) embeds 100+ languages — incl. Vietnamese
 // — into a shared space, so retrieval works on non-English notes where the old English-only
 // `bge-small-en` scored poorly. Dense vectors are 1024-dim, CLS-pooled + L2-normalized. Quantized

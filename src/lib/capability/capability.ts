@@ -65,9 +65,11 @@ export interface ModelSpec {
   is8bPlus: boolean;
 }
 
+// RAM-baseline specs for the two legacy reference models. NOTE: the live picker gates OOM by download
+// SIZE via `catalog.needsOomAck` (ADR-022); this map + `requiresOomAck` are the RAM-based baseline.
 export const MODEL_SPECS: Record<string, ModelSpec> = {
-  [DEFAULT_CHAT_MODEL]: { id: DEFAULT_CHAT_MODEL, minRamGB: 8, is8bPlus: false }, // Phi-3-Mini
-  [OPTIONAL_CHAT_MODEL]: { id: OPTIONAL_CHAT_MODEL, minRamGB: 16, is8bPlus: true } // Llama-3-8B
+  [DEFAULT_CHAT_MODEL]: { id: DEFAULT_CHAT_MODEL, minRamGB: 8, is8bPlus: false }, // Phi-3-mini
+  [OPTIONAL_CHAT_MODEL]: { id: OPTIONAL_CHAT_MODEL, minRamGB: 16, is8bPlus: true } // Llama-3.1-8B
 };
 
 /**

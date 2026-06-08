@@ -28,7 +28,7 @@ export interface Settings {
 export const DEFAULT_SETTINGS: Settings = {
   schemaVersion: SETTINGS_SCHEMA_VERSION,
   vaultPath: null,
-  activeModel: DEFAULT_CHAT_MODEL, // Phi-3-Mini (ADR-007 / FR-MDL-005)
+  activeModel: DEFAULT_CHAT_MODEL, // baseline default; the live picker starts at Llama-3.2-1B (catalog.ts, ADR-022 / FR-MDL-005)
   theme: 'system',
   logging: false,
   clearClipboard: false,

@@ -3,8 +3,8 @@
 // Pure & deterministic (ALGORITHMS §7): unit-testable without a GPU, DB, or network.
 //
 // TOKEN SIZING: chunks must be sized with the SAME tokenizer that embeds them
-// (the bge-small tokenizer), or a "500-token" chunk could exceed the 512-token
-// window and be silently truncated — the R-1 class bug (ADR-006). The real bge
+// (the bge-m3 tokenizer), or a "500-token" chunk could exceed the 8192-token
+// window and be silently truncated — the R-1 class bug (ADR-006 → ADR-021). The real bge
 // tokenizer needs the model (network/Worker), so it is INJECTED as `countTokens`
 // and wired in the embedder slice. The default heuristic below is a placeholder
 // for offline/unit use only; production passes the bge counter.
