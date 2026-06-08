@@ -83,6 +83,7 @@
   import { selectContext } from '$lib/context/select';
   import {
     redactionPreview,
+    redactionsForEntity,
     piiRedactions,
     redactionSummary,
     toCompilerRedactions,
@@ -291,6 +292,9 @@
   let compileTask = $state(''); // CE2 — optional question → a paste-and-go payload (cite-by-path#seq)
   const PII_TYPES: PiiType[] = ['email', 'phone', 'ssn', 'credit_card', 'ip'];
   let compilePii = $state(new Set<PiiType>()); // CE3 — PII types to scrub before serialization
+  let redactEntityId = $state(''); // CE3 — redact a chosen entity (all its aliases) by id
+  let redactConnected = $state(false); // CE3 — also redact its connected people/projects
+  let compileEntityRedactions = $state<Redaction[]>([]); // resolved patterns for the picked entity
   let compileBudget = $state(4000); // CE1 — token budget when compiling "this context"
   let pasteBack = $state(''); // CE4 — paste a frontier answer to resolve its citations back to the vault
   let exportAudit = $state<AuditRecord[]>([]); // CE3 — local export log (hashes + counts only, NFR-SEC-004)
@@ -1772,11 +1776,41 @@
   // --- Context Compiler (FR-CTX-*) -----------------------------------------
   const hashOfDoc = (docId: string): string =>
     String(vault.find((n) => n.docId === docId)?.frontmatter?.nebula_hash ?? '');
-  // Combined redactions (CE3): the manual comma list + the chosen PII types, all labelled for preview/audit.
+  // Combined redactions (CE3): manual comma list + chosen PII types + the picked entity (and optionally
+  // its connected people/projects), all labelled for the preview/audit.
   const compileRedactions = $derived<Redaction[]>([
     ...parseRedactions(compileRedact).map((r) => ({ pattern: r.pattern, label: 'manual' })),
-    ...piiRedactions([...compilePii])
+    ...piiRedactions([...compilePii]),
+    ...compileEntityRedactions
   ]);
+  // CE3 — resolve the picked entity to redaction patterns: its own aliases, plus (optionally) the
+  // aliases of its 1-hop connected entities from the graph. Async (a neighbour lookup) — uses the
+  // pure `redactionsForEntity` core; the alias data comes from the persisted entity records.
+  async function applyEntityRedaction() {
+    if (!redactEntityId || !pipe) {
+      compileEntityRedactions = [];
+      return;
+    }
+    const all = (await pipe.entityData()).entities;
+    const ent = all.find((e) => e.id === redactEntityId);
+    if (!ent) {
+      compileEntityRedactions = [];
+      return;
+    }
+    let connected: { name: string; aliases?: string[] }[] = [];
+    if (redactConnected) {
+      const neighbors = await pipe.entityNeighbors(redactEntityId, 1);
+      const byId = new Map(all.map((e) => [e.id, e]));
+      connected = neighbors
+        .map((n) => byId.get(n.id))
+        .filter((e): e is NonNullable<typeof e> => !!e)
+        .map((e) => ({ name: e.name, aliases: e.aliases }));
+    }
+    compileEntityRedactions = redactionsForEntity(
+      { name: ent.name, aliases: ent.aliases },
+      connected
+    );
+  }
   const compileResult = $derived(
     compileOpen && compileSources.length
       ? compile({
@@ -2793,6 +2827,34 @@
             >
           {/each}
         </div>
+        {#if entityIndex.length}
+          <div class="pii-row">
+            <span class="pii-label">Redact entity:</span>
+            <select
+              bind:value={redactEntityId}
+              onchange={applyEntityRedaction}
+              title="Remove this entity (all its aliases) from the payload"
+            >
+              <option value="">— none —</option>
+              {#each entityIndex as e (e.id)}
+                <option value={e.id}>{e.name}</option>
+              {/each}
+            </select>
+            <label
+              class="pii-chip"
+              title="Also redact its connected people/projects from the graph"
+            >
+              <input
+                type="checkbox"
+                checked={redactConnected}
+                onchange={(ev) => {
+                  redactConnected = (ev.currentTarget as HTMLInputElement).checked;
+                  void applyEntityRedaction();
+                }}
+              />+ connected
+            </label>
+          </div>
+        {/if}
         {#if redactPreview.length}
           <div
             class="redact-preview"
