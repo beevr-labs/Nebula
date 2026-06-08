@@ -76,6 +76,11 @@ function countTokens(text: string, enc: EncodingName): number {
   return (enc === 'o200k_base' ? encodeO200k(text) : encodeCl100k(text)).length;
 }
 
+/** Count tokens for a target model using its named tokenizer — the injected counter CE1 budgets with. */
+export function countTokensFor(text: string, targetModel: string): number {
+  return countTokens(text, tokenizerFor(targetModel));
+}
+
 // --- XML escaping ------------------------------------------------------------
 function escapeText(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');

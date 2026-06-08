@@ -79,7 +79,20 @@
     type SourceRef
   } from '$lib/retrieval/search';
   import { sourcesFromNotes, sourcesFromHits, parseRedactions } from '$lib/context/sources';
-  import { compile } from '$lib/context/compiler';
+  import { compile, countTokensFor } from '$lib/context/compiler';
+  import { selectContext } from '$lib/context/select';
+  import {
+    redactionPreview,
+    piiRedactions,
+    redactionSummary,
+    toCompilerRedactions,
+    buildAuditRecord,
+    type Redaction,
+    type PiiType,
+    type AuditRecord
+  } from '$lib/context/redact';
+  import { resolvePastedAnswer } from '$lib/context/roundtrip';
+  import { formatCost } from '$lib/context/cost';
 
   type Note = {
     docId: string;
@@ -274,6 +287,13 @@
   let compileRedact = $state('');
   let compileSources = $state<ReturnType<typeof sourcesFromNotes>>([]);
   let compileFrom = $state<'scope' | 'answer'>('scope');
+  // Context-Engine controls (CE2/CE3/CE1/CE4).
+  let compileTask = $state(''); // CE2 — optional question → a paste-and-go payload (cite-by-path#seq)
+  const PII_TYPES: PiiType[] = ['email', 'phone', 'ssn', 'credit_card', 'ip'];
+  let compilePii = $state(new Set<PiiType>()); // CE3 — PII types to scrub before serialization
+  let compileBudget = $state(4000); // CE1 — token budget when compiling "this context"
+  let pasteBack = $state(''); // CE4 — paste a frontier answer to resolve its citations back to the vault
+  let exportAudit = $state<AuditRecord[]>([]); // CE3 — local export log (hashes + counts only, NFR-SEC-004)
 
   // 40/60 resizable split (FR-UI-001).
   let leftPct = $state(40);
@@ -1752,13 +1772,38 @@
   // --- Context Compiler (FR-CTX-*) -----------------------------------------
   const hashOfDoc = (docId: string): string =>
     String(vault.find((n) => n.docId === docId)?.frontmatter?.nebula_hash ?? '');
+  // Combined redactions (CE3): the manual comma list + the chosen PII types, all labelled for preview/audit.
+  const compileRedactions = $derived<Redaction[]>([
+    ...parseRedactions(compileRedact).map((r) => ({ pattern: r.pattern, label: 'manual' })),
+    ...piiRedactions([...compilePii])
+  ]);
   const compileResult = $derived(
     compileOpen && compileSources.length
       ? compile({
           sources: compileSources,
           targetModel: compileModel,
-          redactions: parseRedactions(compileRedact)
+          redactions: toCompilerRedactions(compileRedactions),
+          task: compileTask.trim() ? { question: compileTask.trim() } : undefined // CE2
         })
+      : null
+  );
+  // CE3 — exactly what the redactions will remove, computed over the source text (same regex as compile()).
+  const redactPreview = $derived(
+    compileOpen && compileSources.length && compileRedactions.length
+      ? redactionPreview(
+          compileSources.flatMap((s) => s.chunks.map((c) => c.text)),
+          compileRedactions
+        ).filter((p) => p.count > 0)
+      : []
+  );
+  // CE4 — resolve a pasted frontier answer's [path#seq] / [#n] citations back to vault chunkIds.
+  const pasteResolved = $derived(
+    pasteBack.trim()
+      ? resolvePastedAnswer(
+          pasteBack,
+          vault.map((n) => n.docId),
+          compileSources.flatMap((s) => s.chunks.map((c) => `${s.docId}#${c.seq}`))
+        )
       : null
   );
   function openCompileFromScope() {
@@ -1771,15 +1816,41 @@
   }
   function openCompileFromHits() {
     if (!hits.length) return;
+    // CE1 — budget the retrieved candidates (semantic seeds + graph-connected siblings) to compileBudget.
+    const sel = selectContext(
+      hits.map((h) => ({
+        chunkId: h.chunkId,
+        docId: h.docId,
+        seq: Number(h.chunkId.split('#')[1] ?? 0),
+        text: h.text,
+        page: h.page,
+        score: h.score,
+        graphConnected: graphExpandedIds.has(h.chunkId),
+        sharedCount: graphShared.get(h.chunkId)?.sharedCount
+      })),
+      { tokenBudget: compileBudget, countTokens: (t) => countTokensFor(t, compileModel) }
+    );
     compileSources = sourcesFromHits(
-      hits.map((h) => ({ chunkId: h.chunkId, docId: h.docId, text: h.text, page: h.page })),
+      sel.selected.map((h) => ({ chunkId: h.chunkId, docId: h.docId, text: h.text, page: h.page })),
       hashOfDoc
     );
     compileFrom = 'answer';
     compileOpen = true;
   }
   async function copyCompiled() {
-    if (compileResult) await navigator.clipboard.writeText(compileResult.xml);
+    if (!compileResult) return;
+    await navigator.clipboard.writeText(compileResult.xml);
+    // CE3 — on confirmed export, append a content-free audit record (hashes + counts only).
+    exportAudit = [
+      ...exportAudit,
+      buildAuditRecord({
+        sources: compileResult.manifest.sources,
+        tokenCount: compileResult.manifest.tokenCount,
+        targetModel: compileModel,
+        redactionSummary: redactionSummary(redactPreview),
+        exportedAt: new Date().toISOString()
+      })
+    ];
   }
   function downloadCompiled() {
     if (!compileResult) return;
@@ -2691,24 +2762,105 @@
               {#each COMPILE_MODELS as m (m)}<option value={m}>{m}</option>{/each}
             </select>
           </label>
+          {#if compileFrom === 'answer'}
+            <label title="Token budget for the relevant-~5% selection (CE1)">
+              Budget
+              <input type="number" min="200" step="200" bind:value={compileBudget} />
+            </label>
+          {/if}
           <label class="redact">
             Redact (comma-separated)
             <input bind:value={compileRedact} placeholder="Acme, John Doe, 555-…" />
           </label>
         </div>
+        <label class="task-input">
+          Task (optional) — makes the payload paste-and-go
+          <input bind:value={compileTask} placeholder="e.g. How do we de-risk this deal?" />
+        </label>
+        <div class="pii-row">
+          <span class="pii-label">Scrub PII:</span>
+          {#each PII_TYPES as t (t)}
+            <label class="pii-chip">
+              <input
+                type="checkbox"
+                checked={compilePii.has(t)}
+                onchange={() => {
+                  const next = new Set(compilePii);
+                  next.has(t) ? next.delete(t) : next.add(t);
+                  compilePii = next;
+                }}
+              />{t}</label
+            >
+          {/each}
+        </div>
+        {#if redactPreview.length}
+          <div
+            class="redact-preview"
+            title="Exactly what will be removed before anything is copied"
+          >
+            🛡 Will remove:
+            {#each redactPreview as p (p.label + p.pattern)}
+              <span class="redact-pill">{p.label} ×{p.count}</span>
+            {/each}
+          </div>
+        {/if}
         {#if compileResult}
           <div class="compiler-meta">
             ~<strong>{compileResult.manifest.tokenCount}</strong> tokens · tokenizer
-            {compileResult.manifest.tokenizer} ·
+            {compileResult.manifest.tokenizer}
+          </div>
+          <!-- CE5 — cost honesty: estimated cost + context-window fit for the target model. -->
+          <div class="cost-line" class:over={!compileResult.manifest.cost.fitsWindow}>
+            💰 {formatCost(compileResult.manifest.cost)}
+          </div>
+          <div class="compiler-meta">
             <span class="consent"
               >⚠ {compileSources.length} source(s) will leave the device when you copy/paste</span
             >
           </div>
-          <textarea class="compiler-xml" readonly rows="14" value={compileResult.xml}></textarea>
+          <textarea class="compiler-xml" readonly rows="12" value={compileResult.xml}></textarea>
           <div class="compiler-actions">
             <button class="ask" onclick={copyCompiled}>⧉ Copy</button>
             <button class="ghost" onclick={downloadCompiled}>⤓ Download .xml</button>
+            {#if exportAudit.length}
+              <span class="audit-count" title="Local export audit (hashes + counts only)"
+                >📝 {exportAudit.length} export{exportAudit.length > 1 ? 's' : ''} logged</span
+              >
+            {/if}
           </div>
+          <!-- CE4 — paste a frontier-model answer back; its [path#seq] / [#n] citations resolve to notes. -->
+          <details class="paste-back">
+            <summary>↩ Paste the model's answer back to navigate its citations</summary>
+            <textarea
+              bind:value={pasteBack}
+              rows="4"
+              placeholder="Paste GPT/Claude's answer here — [path#seq] citations become clickable jumps to your notes."
+            ></textarea>
+            {#if pasteResolved}
+              <div class="paste-refs">
+                {#each pasteResolved.refs as r, i (i)}
+                  {#if r.resolved && r.chunkId}
+                    {@const cid = r.chunkId}
+                    <button
+                      class="paste-ref"
+                      onclick={() => {
+                        compileOpen = false;
+                        jumpTo(cid);
+                      }}>{r.raw} → open</button
+                    >
+                  {:else}
+                    <span class="paste-ref broken" title="Couldn't find this source in the vault"
+                      >{r.raw} ✕</span
+                    >
+                  {/if}
+                {/each}
+                {#if pasteResolved.refs.length === 0}
+                  <span class="hint">No [path#seq] or [#n] citations found in the pasted text.</span
+                  >
+                {/if}
+              </div>
+            {/if}
+          </details>
         {:else}
           <div class="compiler-meta">Nothing to compile.</div>
         {/if}
@@ -3333,6 +3485,103 @@
   .compiler-actions {
     display: flex;
     gap: 0.5rem;
+    align-items: center;
+  }
+  /* Context-Engine panel additions (CE1/CE2/CE3/CE4/CE5). */
+  .task-input {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    font-size: 0.72rem;
+    color: #5a5a62;
+    margin-top: 0.4rem;
+  }
+  .task-input input {
+    border: 1px solid #e4e4ea;
+    border-radius: 6px;
+    padding: 0.3rem 0.45rem;
+    font: inherit;
+  }
+  .pii-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem 0.6rem;
+    font-size: 0.72rem;
+    color: #5a5a62;
+    margin-top: 0.4rem;
+  }
+  .pii-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+  }
+  .redact-preview {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.72rem;
+    color: #9a5a00;
+    margin-top: 0.4rem;
+  }
+  .redact-pill {
+    background: #fff3e0;
+    border: 1px solid #f0d8b0;
+    border-radius: 999px;
+    padding: 0.05rem 0.45rem;
+  }
+  .cost-line {
+    font-size: 0.78rem;
+    color: #1a7f37;
+    margin: 0.2rem 0;
+  }
+  .cost-line.over {
+    color: #b00020;
+    font-weight: 600;
+  }
+  .audit-count {
+    font-size: 0.72rem;
+    color: #6750a4;
+  }
+  .paste-back {
+    margin-top: 0.5rem;
+    font-size: 0.78rem;
+  }
+  .paste-back summary {
+    cursor: pointer;
+    color: #6750a4;
+  }
+  .paste-back textarea {
+    width: 100%;
+    box-sizing: border-box;
+    margin-top: 0.4rem;
+    border: 1px solid #e4e4ea;
+    border-radius: 8px;
+    padding: 0.45rem;
+    font: inherit;
+    resize: vertical;
+  }
+  .paste-refs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    margin-top: 0.4rem;
+  }
+  .paste-ref {
+    border: 1px solid #d9d2f0;
+    background: #f6f3ff;
+    color: #4a3f86;
+    border-radius: 6px;
+    padding: 0.1rem 0.4rem;
+    font-size: 0.72rem;
+    cursor: pointer;
+  }
+  .paste-ref.broken {
+    background: #fbe9e9;
+    border-color: #f0c0c0;
+    color: #8a1f1f;
+    cursor: default;
   }
   select,
   textarea,
