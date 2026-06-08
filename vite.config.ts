@@ -4,8 +4,8 @@ import { defineConfig } from 'vite';
 // CRITICAL (DEPENDENCIES.lock §6): WebLLM + Transformers.js need a
 // cross-origin-isolated context (SharedArrayBuffer / threaded WASM).
 // These headers are required in DEV; the SAME two headers must also be
-// emitted by the Tauri production webview (see src-tauri/tauri.conf.json).
-// Verify `self.crossOriginIsolated === true` at runtime (Phase 0 GATE A).
+// emitted by the production web host (static deploy / PWA — set them at the
+// CDN/server). Verify `self.crossOriginIsolated === true` at runtime (Phase 0 GATE A).
 //
 // COEP is `credentialless` (not `require-corp`): both give crossOriginIsolated on Chromium, but
 // credentialless loads cross-origin resources credential-free without demanding a
@@ -38,7 +38,7 @@ const crossOriginIsolation = {
 export default defineConfig({
   plugins: [crossOriginIsolation, sveltekit()],
 
-  // Tauri expects a fixed dev port and no clearing of the screen.
+  // Fixed dev port (Claude Preview / live verification), no screen clearing.
   clearScreen: false,
   server: {
     port: 1420,

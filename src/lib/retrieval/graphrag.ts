@@ -95,7 +95,9 @@ export function fuseGraphRag(
   for (const h of seeds) byId.set(h.chunkId, h); // seeds overwrite, authoritative
 
   const vectorRanking = [...byId.values()]
-    .sort((a, b) => b.score - a.score || (a.chunkId < b.chunkId ? -1 : a.chunkId > b.chunkId ? 1 : 0))
+    .sort(
+      (a, b) => b.score - a.score || (a.chunkId < b.chunkId ? -1 : a.chunkId > b.chunkId ? 1 : 0)
+    )
     .map((h) => h.chunkId);
 
   // Graph ranking: the expansion order (already graph-proximity sorted by the caller).

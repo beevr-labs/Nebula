@@ -14,7 +14,6 @@ export default [
       'build/',
       '.svelte-kit/',
       'dist/',
-      'src-tauri/target/',
       'node_modules/',
       'package-lock.json',
       'tests/bench/out/'

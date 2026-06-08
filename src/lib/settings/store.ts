@@ -2,8 +2,8 @@
 // forward-only schema migration; retrieval/ingestion params validated against
 // safe bounds, including the FR-ING-003 / ADR-006 embedding-window invariant (FR-SET-002).
 //
-// Pure core + injectable IO (SettingsIO) so persistence is testable without Tauri/disk.
-// At runtime the IO adapter routes through fs_scope (NFR-SEC-003).
+// Pure core + injectable IO (SettingsIO) so persistence is testable without a real store.
+// At runtime the IO adapter persists to the browser (SurrealDB/OPFS).
 
 import { DEFAULT_CHAT_MODEL, EMBEDDING_MAX_TOKENS } from '$lib/inference/provider';
 

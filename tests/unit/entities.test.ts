@@ -80,7 +80,12 @@ describe('parseEntityResponse', () => {
     const ext = parseEntityResponse(
       '{"entities":[{"name":"A","type":"org"},{"name":"B","type":"org"},{"name":"C","type":"org"}],"relations":[{"source":"A","target":"B","type":"acquired","confidence":1.4},{"source":"B","target":"C","type":"uses"}]}'
     );
-    expect(ext?.relations[0]).toEqual({ source: 'A', target: 'B', type: 'acquired', confidence: 1 });
+    expect(ext?.relations[0]).toEqual({
+      source: 'A',
+      target: 'B',
+      type: 'acquired',
+      confidence: 1
+    });
     expect(ext?.relations[1]).toEqual({ source: 'B', target: 'C', type: 'uses' }); // no confidence key
   });
 

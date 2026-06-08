@@ -11,8 +11,7 @@
   import { buildTitleIndex, weaveLinks, notePreview, type WovenSegment } from '$lib/weave/weaver';
   import { buildMicroGraph, type MicroGraph } from '$lib/graph/micrograph';
   import { selectGraphRagContext } from '$lib/retrieval/graphrag';
-  import { extractEntities } from '$lib/graph/entities';
-  import { resolveExtraction } from '$lib/graph/resolve';
+  import { ingestDocGraph } from '$lib/graph/ingest-graph';
   import { buildEntityIndex, type EntityEntry } from '$lib/graph/entity-index';
   import { buildEntityGraph, type EntityGraph, type GraphNeighbor } from '$lib/graph/entity-graph';
   import type { EntityRecord, MentionEdge, RelationEdge } from '$lib/graph/types';
@@ -319,17 +318,6 @@
   } | null = null;
   let loadedModel = $state('');
 
-  // Cheap, stable content hash (FNV-1a) for the incremental-extraction guard: if a note's text hasn't
-  // changed since its last graph extraction, skip the expensive LLM pass entirely (perf).
-  function graphHash(text: string): string {
-    let h = 0x811c9dc5;
-    for (let i = 0; i < text.length; i++) {
-      h ^= text.charCodeAt(i);
-      h = Math.imul(h, 0x01000193);
-    }
-    return (h >>> 0).toString(16);
-  }
-
   onMount(async () => {
     coi = crossOriginIsolated;
     // Probe WebGPU once at startup (FR-CAP-001, ADR-030): is chat possible, on what GPU, and what is
@@ -450,39 +438,13 @@
     // no chat model loaded there's nothing to extract WITH, so skip — chunks/embeddings (and thus
     // plain RAG) are unaffected. With a model loaded, skim → extract → resolve → persist with
     // chunk-level provenance so GraphRAG can later expand on shared entities.
+    // Thin adapter over ingestDocGraph (graph/ingest-graph.ts) — keeps the legacy numeric contract the
+    // callers below use: -1 = skipped (unchanged), >0 = entities extracted, 0 = nothing/no model.
     const indexGraph = async (docId: string, text: string): Promise<number> => {
       const gen: TextGenerator | null =
         loadedModel && provider.complete ? (p, o) => provider.complete(p, o) : null;
-      if (!gen) return 0;
-      // Incremental guard (perf): skip the LLM extraction when this exact text was already extracted.
-      // Turns a repeat "build graph" from a minutes-long full pass into re-reading only CHANGED notes.
-      const hash = graphHash(text);
-      if ((await store.getGraphHash(docId)) === hash) return -1; // -1 = skipped (unchanged)
-      const res = await extractEntities(text, gen);
-      if (!res.ok) return 0;
-      const g = resolveExtraction(res.extraction);
-      if (g.entities.length === 0) return 0;
-      await store.clearDocGraph(docId);
-      for (const e of g.entities) await store.upsertEntity(e);
-      // Attach each entity to the chunks whose text actually names it → chunk-level provenance, which
-      // is what lets GraphRAG pull the RIGHT sibling chunks (not the whole doc) on a shared entity.
-      const chunks = await store.chunkTextsForDoc(docId);
-      const lc = chunks.map((c) => ({ chunkId: c.chunkId, text: c.text.toLowerCase() }));
-      for (const e of g.entities) {
-        const surfaces = [e.name, ...e.aliases].map((s) => s.toLowerCase()).filter(Boolean);
-        for (const c of lc) {
-          if (surfaces.some((s) => c.text.includes(s)))
-            await store.relateMention(c.chunkId, docId, e.id);
-        }
-      }
-      // Quality gate: drop weak/guessed relations so the graph isn't polluted with low-signal edges
-      // (e.g. a tiny model labelling everything the same generic type). 0.5 is a forgiving floor.
-      for (const r of g.relations) {
-        if ((r.confidence ?? 1) < 0.5) continue;
-        await store.relateEntities(r.sourceId, r.targetId, r.type, docId);
-      }
-      await store.setGraphHash(docId, hash); // mark this text as extracted → next rebuild skips it
-      return g.entities.length;
+      const r = await ingestDocGraph(store, docId, text, gen);
+      return r.status === 'skipped' ? -1 : r.status === 'ingested' ? r.entityCount : 0;
     };
 
     pipe = {

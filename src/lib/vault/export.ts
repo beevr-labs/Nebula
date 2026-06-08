@@ -7,7 +7,7 @@
 // guarantees 100% migration compatibility (NFR-PORT-001).
 //
 // Pure & deterministic (ALGORITHMS §8): no network/DB/GPU, no clock — identical input
-// yields byte-identical output. The DB rows are passed in; the caller (Tauri or the PWA)
+// yields byte-identical output. The DB rows are passed in; the caller (the browser/PWA)
 // wires the actual read and the browser download (Blob → <a download>). buildVaultExport
 // never mutates its inputs — the originals (incl. imported PDFs) are never touched.
 

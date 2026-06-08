@@ -3,7 +3,7 @@
 // Produces per-page text + char offsets so the chunker can map a chunk back to its page
 // (pageForOffset → FR-CHAT-003 citation scroll/highlight).
 //
-// PDF parsing works fully IN THE BROWSER (no desktop/Tauri needed, ADR-028) — pdfjs just needs its
+// PDF parsing works fully IN THE BROWSER (no desktop runtime needed, ADR-028) — pdfjs just needs its
 // worker URL set. We do that lazily and browser-only; Node falls back to pdfjs's built-in fake
 // worker (so the integration tests run without any worker file).
 
