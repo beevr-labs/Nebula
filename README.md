@@ -48,6 +48,26 @@ Plain vector search returns the **2** notes whose wording matches. **GraphRAG ad
 
 Great for onboarding (*"who owns what?"*), incident response (*"who do I loop in?"*), and impact analysis (*"everything that touches Acme Corp"*).
 
+### 🤝 A deal war-room — from scattered notes to a winning play
+
+A reproducible walkthrough. You're closing **Project Aurora** with **Northwind**, and your notes are scattered the way they really are — a status note, a budget note, a competitor note, a POC note, an org-map note:
+
+```
+deals/aurora-status.md       Project Aurora with Northwind is in final negotiation; Dana (our AE) expects signature this quarter.
+deals/aurora-budget.md       Priya, Northwind's CFO, hasn't approved the Aurora budget yet — the main risk to closing.
+deals/aurora-competition.md  Helix Systems undercut us on price for the same Aurora scope.
+deals/aurora-poc.md          Orion, a Northwind subsidiary, ran the POC and validated performance.
+deals/aurora-champion.md     Sam, Northwind's VP of Procurement, champions Aurora and pushes it internally.
+```
+
+1. **Build the graph.** Click **✨ build graph**. The on-device LLM reads each note and extracts the entities — *Northwind, Project Aurora, Priya (CFO), Sam (VP), Helix Systems, Orion* — **and how they connect**: *Priya **controls_budget** Aurora*, *Sam **champions** Aurora*, *Helix **competes_with** us*, *Orion **evaluated** the product*.
+2. **Ask** with **🕸 GraphRAG** and **💡 Reason** on:
+   > *"How do we win the Northwind deal — what's blocking it and what should we do?"*
+3. **What comes back.** Plain vector search returns only the *status* note — the budget and champion notes share **no words** with your question. GraphRAG pulls them in anyway, because they share the entities *Northwind* and *Project Aurora*; the model then reasons across them and answers with a **cited plan**:
+   > *Two things block Aurora: CFO **Priya** hasn't cleared the budget [#1], and **Helix** undercut us on price [#3]. To close: (1) work Priya to unblock the budget; (2) neutralise Helix by leaning on **Orion's validated POC** [#4]; (3) mobilise champion **Sam** to push internally [#5].*
+
+The blockers *and* the levers came from notes a keyword search would never surface — retrieval by **connection**, not wording. *(Verified live on a real on-device model — Qwen2.5-3B, WebGPU; the retrieval + reasoning path is covered by `tests/integration/graphrag-flow.test.ts`.)*
+
 ### 🔒 A private research vault
 
 Thousands of PDFs and notes you can't or won't upload — contracts, papers, source code, journals. Ask in plain language, get cited answers offline, and when you want a frontier model, **Compile Context** hands Claude/GPT a token-counted, redactable slice instead of the raw files.
