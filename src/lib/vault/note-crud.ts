@@ -77,21 +77,23 @@ export function normalizeFolder(folder: string): string {
 }
 
 /**
- * Derive a collision-free `<folder>/<slug>.md` path (FR-NOTE-002/007). `folder` defaults to
- * `notes`; a user can nest (`clients/acme`). If the base path is already in `existingPaths`,
- * append `-2`, `-3`, … until free, so saving two same-named notes never overwrites the first.
+ * Derive a collision-free `<folder>/<slug>.md` path (FR-NOTE-002/007). An OMITTED `folder` defaults
+ * to `notes`; a user can nest (`clients/acme`) OR pass an EXPLICIT blank/`''` to place the note at
+ * the vault root (`<slug>.md`, no folder). If the base path is already in `existingPaths`, append
+ * `-2`, `-3`, … until free, so saving two same-named notes never overwrites the first.
  */
 export function deriveNotePath(
   title: string,
   opts: { folder?: string; existingPaths?: Iterable<string> } = {}
 ): string {
-  const folder = normalizeFolder(opts.folder ?? 'notes') || 'notes';
+  const folder = normalizeFolder(opts.folder ?? 'notes'); // '' (root) only when explicitly blank
   const taken = new Set(opts.existingPaths ?? []);
   const slug = slugify(title);
-  let candidate = `${folder}/${slug}.md`;
+  const stem = folder ? `${folder}/${slug}` : slug;
+  let candidate = `${stem}.md`;
   let n = 2;
   while (taken.has(candidate)) {
-    candidate = `${folder}/${slug}-${n}.md`;
+    candidate = `${stem}-${n}.md`;
     n++;
   }
   return candidate;
@@ -113,8 +115,8 @@ export function moveNotePath(
   existingPaths: Iterable<string> = []
 ): string {
   const file = docId.slice(docId.lastIndexOf('/') + 1); // e.g. "apollo.md"
-  const folder = normalizeFolder(newFolder) || 'notes';
-  let candidate = `${folder}/${file}`;
+  const folder = normalizeFolder(newFolder); // '' (root) when explicitly blank
+  let candidate = folder ? `${folder}/${file}` : file;
   if (candidate === docId) return docId; // already there
   const taken = new Set(existingPaths);
   taken.delete(docId);
@@ -123,7 +125,7 @@ export function moveNotePath(
   const ext = dot > 0 ? file.slice(dot) : '';
   let n = 2;
   while (taken.has(candidate)) {
-    candidate = `${folder}/${base}-${n}${ext}`;
+    candidate = folder ? `${folder}/${base}-${n}${ext}` : `${base}-${n}${ext}`;
     n++;
   }
   return candidate;
@@ -220,7 +222,7 @@ export interface RenameNoteInput {
  */
 export async function renameNote(input: RenameNoteInput): Promise<NoteFile> {
   const slash = input.docId.lastIndexOf('/');
-  const folder = slash >= 0 ? input.docId.slice(0, slash) : 'notes';
+  const folder = slash >= 0 ? input.docId.slice(0, slash) : ''; // '' keeps a root note at the root
   const updated = await updateNote({
     docId: input.docId,
     markdown: input.markdown,

@@ -54,6 +54,13 @@ describe('deriveNotePath', () => {
       'clients/note-2.md'
     );
   });
+  it('places the note at the vault root when folder is explicitly blank', () => {
+    expect(deriveNotePath('My Note', { folder: '' })).toBe('my-note.md');
+    expect(deriveNotePath('My Note', { folder: '  /  ' })).toBe('my-note.md');
+  });
+  it('suffixes at the root on collision', () => {
+    expect(deriveNotePath('Note', { folder: '', existingPaths: ['note.md'] })).toBe('note-2.md');
+  });
 });
 
 describe('moveNotePath', () => {
@@ -62,6 +69,9 @@ describe('moveNotePath', () => {
   });
   it('is a no-op when already in the target folder', () => {
     expect(moveNotePath('notes/apollo.md', 'notes')).toBe('notes/apollo.md');
+  });
+  it('moves a note out to the vault root when the folder is blank', () => {
+    expect(moveNotePath('notes/apollo.md', '')).toBe('apollo.md');
   });
   it('suffixes the stem on a name clash in the destination', () => {
     expect(moveNotePath('notes/apollo.md', 'clients', ['clients/apollo.md'])).toBe(
@@ -105,6 +115,23 @@ describe('renameNote', () => {
       now: '2026-06-06T00:00:00Z'
     });
     expect(renamed.docId).toBe('clients/acme/spec-v2.md');
+  });
+
+  it('keeps a root note at the vault root when renamed', async () => {
+    const created = await createNote({
+      title: 'Loose',
+      body: 'x',
+      now: '2026-06-06T00:00:00Z',
+      folder: ''
+    });
+    const renamed = await renameNote({
+      docId: created.docId,
+      markdown: created.markdown,
+      newTitle: 'Loose v2',
+      now: '2026-06-06T00:00:00Z'
+    });
+    expect(created.docId).toBe('loose.md');
+    expect(renamed.docId).toBe('loose-v2.md');
   });
 });
 

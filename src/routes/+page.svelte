@@ -43,6 +43,7 @@
     type AutocompleteState
   } from '$lib/weave/wikilink';
   import { renderMarkdown, linkifyCitations } from '$lib/render/markdown';
+  import { splitReasoning } from '$lib/chat/reasoning';
   import { quickSwitch, type SwitchResult } from '$lib/nav/switcher';
   import {
     BUILTIN_TEMPLATES,
@@ -420,7 +421,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     MODELS.find((m) => m.id === 'Llama-3.2-1B-Instruct-q4f16_1-MLC') ?? MODELS[0]
   ).id;
   let modelId = $state(DEFAULT_MODEL_ID);
-  let query = $state('Does Nebula upload my notes to a server?');
+  let query = $state('');
   let answer = $state('');
   // Multi-turn Ask (FR-CHAT-006): `askedQuery` is the question that produced the CURRENT answer (the
   // composer is cleared on send so a follow-up can be typed); `history` holds the prior completed
@@ -438,19 +439,38 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
   // or invents citations on an ungrounded answer); those are stripped so the user never sees a
   // citation that jumps to nothing (FR-CHAT-002/003).
   const citeNumbers = $derived(new Set(references.map((r) => r.n)));
+  // Reasoning models emit a <think>…</think> block before the answer. Split it out so the reasoning
+  // shows in its own collapsible panel and only the real answer is rendered as Markdown (FR-CHAT).
+  const split = $derived(splitReasoning(answer));
+  const reasoning = $derived(split.reasoning);
+  const reasoningHtml = $derived(
+    split.reasoning ? renderMarkdown(split.reasoning, { resolveLink: resolveNoteLink }) : ''
+  );
   const answerHtml = $derived(
-    answer
-      ? linkifyCitations(renderMarkdown(answer, { resolveLink: resolveNoteLink }), citeNumbers)
+    split.content
+      ? linkifyCitations(
+          renderMarkdown(split.content, { resolveLink: resolveNoteLink }),
+          citeNumbers
+        )
       : ''
   );
   // Past turns in the transcript keep their prose but DROP citation buttons: their retrieved `hits`
   // are no longer held, so Magic Jump couldn't resolve them — an empty valid set strips the markers.
+  // Reasoning is stripped from past turns too (the transcript shows answers, not their scratchpads).
   const NO_CITES: ReadonlySet<number> = new Set();
   const pastAnswerHtml = (a: string): string =>
-    linkifyCitations(renderMarkdown(a, { resolveLink: resolveNoteLink }), NO_CITES);
+    linkifyCitations(
+      renderMarkdown(splitReasoning(a).content, { resolveLink: resolveNoteLink }),
+      NO_CITES
+    );
   let graph = $state<MicroGraph | null>(null);
   let activeDoc = $state<string | null>(null);
   let activeSpan = $state<{ charStart: number; charEnd: number } | null>(null);
+  // Open notes live in a center tab strip (FR-NOTE multi-tab): `openTabs` is the ordered list of
+  // open docIds and `activeDoc` is the one shown. Opening a note (sidebar, citation, backlink…)
+  // adds a tab; closing one falls back to a neighbour. `tabDrag` is the docId being reordered.
+  let openTabs = $state<string[]>([]);
+  let tabDrag = $state<string | null>(null);
   let busy = $state(false);
   let ttft = $state(0);
   let tps = $state(0);
@@ -500,6 +520,8 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
   // File tree + tag pane (FR-NAV-002/003).
   let collapsed = $state(new Set<string>());
   let activeTag = $state<string | null>(null);
+  // Entities pane shows the top 6 by default; this expands it to the full list (scrollable).
+  let showAllEntities = $state(false);
 
   // Live Markdown preview (FR-UI-002 · §5.10).
   let previewOn = $state(true);
@@ -771,7 +793,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
       // First run: greet the user with the guided "Start here" tour (read view) instead of a blank
       // editor, so they immediately see what the app can do and what to try.
       if (vault.some((n) => n.docId === TOUR_DOC)) {
-        activeDoc = TOUR_DOC;
+        openInTab(TOUR_DOC);
         mode = 'ask';
         rightView = 'files';
       }
@@ -1043,7 +1065,8 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     graphBusy = true;
     entityGraph = null;
     entityNotes = [];
-    activeDoc = null;
+    // Keep the open tabs intact — the graph lens just hides the read view; closing it (switchView
+    // 'files') returns to whatever note was active.
     resetGraphView();
     try {
       entityNotes = [...new Set((await pipe.mentionsForEntity(e.id)).map((m) => m.docId))].sort();
@@ -1283,10 +1306,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     await removeNoteCompletely(docId);
     void refreshEntities();
     vault = vault.filter((n) => n.docId !== docId);
-    if (activeDoc === docId) {
-      activeDoc = null;
-      activeSpan = null;
-    }
+    closeTab(docId); // drop its tab (and pick a neighbour if it was active)
     if (editingDocId === docId) {
       editingDocId = null;
       draftTitle = today();
@@ -1367,6 +1387,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
         });
       }
     }
+    openTabs = openTabs.map((d) => (d === note.docId ? file.docId : d));
     if (activeDoc === note.docId) activeDoc = file.docId;
     if (editingDocId === note.docId) editingDocId = file.docId;
     editMsg = `✓ renamed → ${file.docId}${rewrites.size ? ` (rewrote ${rewrites.size} link${rewrites.size > 1 ? 's' : ''})` : ''}`;
@@ -1398,6 +1419,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
       frontmatter: note.frontmatter
     });
     vault = vault.filter((n) => n.docId !== docId).concat([{ ...note, docId: newDocId }]);
+    openTabs = openTabs.map((d) => (d === docId ? newDocId : d));
     if (activeDoc === docId) activeDoc = newDocId;
     if (editingDocId === docId) editingDocId = newDocId;
     editMsg = `✓ moved → ${newDocId}`;
@@ -1717,6 +1739,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     const moveMap = new Map(moves.map((m) => [m.from, m.to]));
     vault = vault.map((n) => (moveMap.has(n.docId) ? { ...n, docId: moveMap.get(n.docId)! } : n));
     for (const m of moves) {
+      openTabs = openTabs.map((d) => (d === m.from ? m.to : d));
       if (activeDoc === m.from) activeDoc = m.to;
       if (editingDocId === m.from) editingDocId = m.to;
     }
@@ -1759,10 +1782,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     emptyFolders = emptyFolders.filter((f) => f !== folder && !f.startsWith(folder + '/'));
     persistFolders();
     vault = vault.filter((n) => !inside.includes(n.docId));
-    if (activeDoc && inside.includes(activeDoc)) {
-      activeDoc = null;
-      activeSpan = null;
-    }
+    for (const docId of inside) closeTab(docId); // drop tabs for every deleted note
     void refreshEntities();
     editMsg = `🗑 deleted folder ${folder}`;
   }
@@ -1815,7 +1835,8 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     cites = [];
     references = [];
     graph = null;
-    activeDoc = null;
+    // Keep the note you're reading open while you ask — only a NEW citation (jumpTo) changes the
+    // active tab. We just drop any stale Magic-Jump highlight so the note shows in full.
     activeSpan = null;
     try {
       status = 'embedding query…';
@@ -1960,18 +1981,60 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     status = '';
   }
 
+  // --- Center tabs (multi-tab read view) ---------------------------------------
+  /** Open a note in the center tab strip (adds a tab if it isn't already open) and make it active. */
+  function openInTab(docId: string) {
+    if (!openTabs.includes(docId)) openTabs = [...openTabs, docId];
+    activeDoc = docId;
+  }
+  /** Close a tab. If it was active, fall back to the tab that slid into its slot, else the one before. */
+  function closeTab(docId: string) {
+    const i = openTabs.indexOf(docId);
+    if (i === -1) return;
+    const next = openTabs.filter((d) => d !== docId);
+    openTabs = next;
+    if (activeDoc === docId) {
+      activeDoc = next[i] ?? next[i - 1] ?? null;
+      activeSpan = null;
+    }
+  }
+  /** Activate an already-open tab without disturbing the others. */
+  function selectTab(docId: string) {
+    activeDoc = docId;
+    activeSpan = null;
+  }
+  // Reorder tabs by dragging one over another (native HTML5 drag-and-drop).
+  function onTabDragStart(e: DragEvent, docId: string) {
+    tabDrag = docId;
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+  }
+  function onTabDragOver(e: DragEvent, overId: string) {
+    if (!tabDrag || tabDrag === overId) return;
+    e.preventDefault();
+    const from = openTabs.indexOf(tabDrag);
+    const to = openTabs.indexOf(overId);
+    if (from === -1 || to === -1) return;
+    const next = [...openTabs];
+    next.splice(from, 1);
+    next.splice(to, 0, tabDrag);
+    openTabs = next;
+  }
+  function onTabDragEnd() {
+    tabDrag = null;
+  }
+
   // Magic Jump (FR-CHAT-003): open the cited chunk's document and highlight its exact span.
   function jumpTo(chunkId: string) {
     const target = resolveCitationTarget(chunkId, hits);
     if (!target) return;
-    activeDoc = target.docId;
+    openInTab(target.docId); // the cited note opens in (or focuses) its tab
     activeSpan = { charStart: target.charStart, charEnd: target.charEnd };
     rightView = 'files'; // Magic Jump lands on the cited note in the doc panel
     mode = 'ask'; // unified center: leave the editor so the cited note renders (read)
   }
 
   function showSource(docId: string) {
-    activeDoc = docId;
+    openInTab(docId);
     activeSpan = null;
     rightView = 'files'; // ensure the note is visible (beside the tree), not hidden behind Graph view
     mode = 'ask'; // unified center: leave the editor so the opened note renders (read), not the draft
@@ -2526,19 +2589,29 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
           <span class="label">Entities</span><span class="tree-count">{entityIndex.length}</span>
         </div>
         {#if entityIndex.length}
-          {#each entityIndex.slice(0, 6) as e (e.id)}
-            {@const on = rightView === 'graph' && selectedEntity?.id === e.id}
+          <div class="ent-list" class:scroll={showAllEntities}>
+            {#each showAllEntities ? entityIndex : entityIndex.slice(0, 6) as e (e.id)}
+              {@const on = rightView === 'graph' && selectedEntity?.id === e.id}
+              <button
+                class="ent-row nb-hov"
+                class:active={on}
+                onclick={() => openEntity(e)}
+                title={e.type}
+              >
+                <span class="ent-dot" style="background:{entityColor(e.type)}"></span>
+                <span class="ent-nm">{e.name}</span>
+                <span class="tree-count">{e.noteCount}</span>
+              </button>
+            {/each}
+          </div>
+          {#if entityIndex.length > 6}
             <button
-              class="ent-row nb-hov"
-              class:active={on}
-              onclick={() => openEntity(e)}
-              title={e.type}
+              class="ent-row more-ent nb-hov"
+              onclick={() => (showAllEntities = !showAllEntities)}
             >
-              <span class="ent-dot" style="background:{entityColor(e.type)}"></span>
-              <span class="ent-nm">{e.name}</span>
-              <span class="tree-count">{e.noteCount}</span>
+              {showAllEntities ? 'Show fewer' : `Show all ${entityIndex.length}`}
             </button>
-          {/each}
+          {/if}
           <button class="ent-row open-lens nb-hov" onclick={() => switchView('graph')}>
             <span class="lens-ic">{@render ic('graph', 14)}</span> Open graph lens
           </button>
@@ -2756,8 +2829,8 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
           <div class="note-col">
             <div class="note-head">
               <div class="breadcrumb">
-                <span>{draftFolder || 'notes'}</span><span class="slash">/</span><span class="mono"
-                  >{(editingDocId ?? draftTitle) + (editingDocId ? '' : '.md')}</span
+                <span>{draftFolder.trim() || 'vault root'}</span><span class="slash">/</span><span
+                  class="mono">{(editingDocId ?? draftTitle) + (editingDocId ? '' : '.md')}</span
                 >
               </div>
               <div class="note-actions">
@@ -2791,8 +2864,8 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
               {#if !editingDocId}<input
                   class="folder-input mono"
                   bind:value={draftFolder}
-                  placeholder="folder"
-                  title="Folder, e.g. clients/acme"
+                  placeholder="folder — blank = vault root"
+                  title="Folder, e.g. clients/acme — leave blank to keep the note at the vault root (no folder)"
                   disabled={savingNote}
                 />{/if}
               <span class="md-tag">Markdown</span>
@@ -2832,14 +2905,50 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
         </div>
       {:else}
         <!-- NOTE — READ -->
+        {#if openTabs.length}
+          <div class="tab-strip" role="tablist">
+            {#each openTabs as docId (docId)}
+              {@const tab = vault.find((n) => n.docId === docId)}
+              <!-- svelte-ignore a11y_click_events_have_key_events -->
+              <div
+                class="tab"
+                class:active={activeDoc === docId}
+                class:dragging={tabDrag === docId}
+                role="tab"
+                tabindex="0"
+                aria-selected={activeDoc === docId}
+                draggable="true"
+                title={docId}
+                onclick={() => selectTab(docId)}
+                onkeydown={(e) => e.key === 'Enter' && selectTab(docId)}
+                ondragstart={(e) => onTabDragStart(e, docId)}
+                ondragover={(e) => onTabDragOver(e, docId)}
+                ondragend={onTabDragEnd}
+              >
+                <span class="tab-ic">{@render ic('file', 12)}</span>
+                <span class="tab-nm">{tab?.title ?? shortName(docId)}</span>
+                <button
+                  class="tab-x nb-hov"
+                  title="Close tab"
+                  aria-label="Close tab"
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    closeTab(docId);
+                  }}>{@render ic('close', 12)}</button
+                >
+              </div>
+            {/each}
+          </div>
+        {/if}
         <div class="note-scroll">
           <div class="note-col">
             {#if activeNote}
               <div class="note-head">
                 <div class="breadcrumb">
-                  <span>{activeNote.docId.split('/').slice(0, -1).join('/') || 'notes'}</span><span
-                    class="slash">/</span
-                  ><span class="mono">{activeNote.docId.split('/').pop()}</span>
+                  <span>{activeNote.docId.split('/').slice(0, -1).join('/') || 'vault root'}</span
+                  ><span class="slash">/</span><span class="mono"
+                    >{activeNote.docId.split('/').pop()}</span
+                  >
                 </div>
                 <div class="note-actions">
                   {#if !activeNote.sourcePath}<button
@@ -2975,10 +3084,21 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
         {/if}
         {#if busy || answer || hits.length}
           {#if askedQuery}<div class="ask-bubble">{askedQuery}</div>{/if}
-          {#if busy && !answer}<div class="rail-loading">
+          {#if busy && !reasoning && !answerHtml}<div class="rail-loading">
               <span class="spinner"></span><span>{status}</span>
             </div>{/if}
-          {#if answer}
+          {#if reasoning}
+            <!-- Reasoning panel: auto-open while the model is still thinking (no answer text yet),
+                 collapses once the real answer starts streaming. User can re-open it any time. -->
+            <details class="think" open={busy && !answerHtml}>
+              <summary>
+                {@render ic('graph', 13)}
+                <span>{busy && !answerHtml ? 'Thinking…' : 'Thoughts'}</span>
+              </summary>
+              <div class="think-body prose">{@html reasoningHtml}</div>
+            </details>
+          {/if}
+          {#if answerHtml}
             <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
             <article
               class="prose answer"
@@ -3858,6 +3978,17 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     background: var(--accent-soft);
     color: var(--accent-ink);
   }
+  .ent-list.scroll {
+    max-height: 280px;
+    overflow-y: auto;
+    scrollbar-width: thin;
+  }
+  .more-ent {
+    color: var(--muted);
+    font-weight: 500;
+    font-size: 12px;
+    padding-left: 10px;
+  }
   .open-lens {
     color: var(--accent);
     font-weight: 500;
@@ -3967,6 +4098,76 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     overflow-y: auto;
     display: flex;
     justify-content: center;
+  }
+  .tab-strip {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: stretch;
+    gap: 2px;
+    padding: 6px 8px 0;
+    overflow-x: auto;
+    border-bottom: 1px solid var(--line);
+    background: var(--bg);
+    scrollbar-width: thin;
+  }
+  .tab {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 200px;
+    height: 30px;
+    padding: 0 6px 0 10px;
+    border: 1px solid transparent;
+    border-bottom: none;
+    border-radius: var(--r-sm) var(--r-sm) 0 0;
+    background: transparent;
+    color: var(--ink-2);
+    font-size: 12.5px;
+    cursor: pointer;
+    user-select: none;
+    flex: 0 0 auto;
+  }
+  .tab:hover {
+    background: var(--surface);
+  }
+  .tab.active {
+    background: var(--surface);
+    border-color: var(--line);
+    color: var(--ink);
+    font-weight: 600;
+  }
+  .tab.dragging {
+    opacity: 0.5;
+  }
+  .tab-ic {
+    display: inline-flex;
+    color: var(--muted);
+    flex: 0 0 auto;
+  }
+  .tab.active .tab-ic {
+    color: var(--accent-ink);
+  }
+  .tab-nm {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tab-x {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border: none;
+    border-radius: var(--r-sm);
+    background: transparent;
+    color: var(--faint);
+    cursor: pointer;
+    flex: 0 0 auto;
+  }
+  .tab-x:hover {
+    background: var(--line);
+    color: var(--ink);
   }
   .note-col {
     width: 100%;
@@ -4513,6 +4714,41 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
   }
   .prose.answer :global(p) {
     margin: 0 0 10px;
+  }
+  /* Reasoning ("Thinking") panel — a subdued, collapsible scratchpad above the real answer. */
+  .think {
+    border: 1px solid var(--line);
+    border-radius: var(--r-md);
+    background: var(--surface-alt);
+    margin-bottom: 12px;
+    overflow: hidden;
+  }
+  .think > summary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 11px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--muted);
+    cursor: pointer;
+    user-select: none;
+    list-style: none;
+  }
+  .think > summary::-webkit-details-marker {
+    display: none;
+  }
+  .think > summary :global(svg) {
+    color: var(--faint);
+  }
+  .think-body {
+    padding: 0 11px 10px;
+    font-size: 12.5px;
+    color: var(--ink-2);
+    border-top: 1px solid var(--line);
+  }
+  .think-body :global(p) {
+    margin: 8px 0 0;
   }
   .used-strip {
     display: flex;
