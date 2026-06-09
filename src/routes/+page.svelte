@@ -506,6 +506,10 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
   let indexRunning = false;
   let bgPending = $state(0); // notes waiting/being indexed (drives the unobtrusive header indicator)
   let bgProgress = $state(''); // e.g. "apollo 32/66" for the current job
+  // Transient "✓ indexed <note> · N entities" confirmation shown in the header when a background
+  // index finishes, then auto-clears back to the plain "indexed" pill (FR-UI: visible feedback).
+  let indexDone = $state('');
+  let indexDoneTimer: ReturnType<typeof setTimeout> | null = null;
   // Set when a background index couldn't extract a note's entity graph because no model was loaded —
   // the embeddings (and plain RAG) still land, but the graph is now behind. Drives a non-blocking
   // "Build graph" hint in the Entities pane; cleared by a successful buildVaultGraph (FR-GRAPH-001).
@@ -999,6 +1003,17 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
   }
 
   const shortName = (docId: string) => docId.slice(docId.lastIndexOf('/') + 1).replace(/\.md$/, '');
+  const truncate = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
+
+  /** Show a transient header confirmation (e.g. "indexed foo · 3 entities"), then clear it. */
+  function flashIndexed(msg: string) {
+    indexDone = msg;
+    if (indexDoneTimer) clearTimeout(indexDoneTimer);
+    indexDoneTimer = setTimeout(() => {
+      indexDone = '';
+      indexDoneTimer = null;
+    }, 4000);
+  }
 
   /** Queue a note for background indexing (drop old chunks first on an edit/rename, then embed). */
   function enqueueIndex(docId: string, body: string, oldDocId?: string) {
@@ -1012,6 +1027,10 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     if (indexRunning || !pipe) return;
     indexRunning = true;
     let missedGraph = false; // a note whose entities couldn't be extracted (no model) → graph behind
+    let doneCount = 0; // notes successfully indexed this drain (for the completion pill)
+    let entSum = 0; // total entities extracted this drain
+    let failed = 0; // notes whose index threw (surfaced instead of silently swallowed)
+    let lastName = ''; // last note's short name (the common single-note case)
     while (indexJobs.length) {
       const job = indexJobs[0];
       try {
@@ -1023,15 +1042,33 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
           bgProgress = total > EMBED_PROGRESS_MIN ? `${shortName(job.docId)} ${done}/${total}` : '';
         });
         // Extract + persist the note's entity graph too (best-effort; needs a loaded model).
-        if ((await pipe.indexGraph(job.docId, job.body)) === -2) missedGraph = true;
+        const ents = await pipe.indexGraph(job.docId, job.body);
+        if (ents === -2) missedGraph = true;
+        if (ents > 0) entSum += ents;
+        lastName = shortName(job.docId);
+        doneCount++;
       } catch {
-        /* a failed index shouldn't wedge the queue; the note stays in the vault, just unindexed */
+        // A failed index shouldn't wedge the queue; the note stays in the vault, just unindexed —
+        // but DON'T swallow it silently: count it so the header can surface "N failed to index".
+        failed++;
       }
       indexJobs.shift();
       bgPending = indexJobs.length;
       bgProgress = '';
     }
     indexRunning = false;
+    // Visible confirmation, then auto-revert to the plain "indexed" pill (the user's request).
+    if (failed > 0) flashIndexed(`⚠ ${failed} note${failed > 1 ? 's' : ''} failed to index`);
+    else if (doneCount > 0) {
+      const subject = doneCount === 1 ? truncate(lastName, 22) : `${doneCount} notes`;
+      const tail =
+        entSum > 0
+          ? ` · ${entSum} ${entSum === 1 ? 'entity' : 'entities'}`
+          : missedGraph
+            ? ' · graph pending — load a model'
+            : '';
+      flashIndexed(`indexed ${subject}${tail}`);
+    }
     await refreshEntities(); // once, after the queue drains — never per-job (avoids the read/write race)
     // If extraction ran (a model was loaded), the graph is current — clear any prior stale flag and
     // refresh the open entity canvas so a new note's entities show without a manual rebuild. If it
@@ -2512,6 +2549,11 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
       {#if bgPending > 0}
         <span class="pill busy-pill"
           ><span class="spinner"></span>indexing{bgProgress ? ` ${bgProgress}` : ''}</span
+        >
+      {:else if indexDone}
+        <span class="pill ok-pill" title="Background indexing finished">
+          {@render ic('check', 13)}
+          {indexDone}</span
         >
       {:else if ready}
         <span class="pill ok-pill">{@render ic('check', 13)} indexed</span>
