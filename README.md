@@ -36,7 +36,7 @@ The full RAG pipeline runs end-to-end **in a real Chrome tab** on a real GPU —
 - **PDF** — real text + per-page offsets via `pdfjs-dist`.
 - **WebGPU chat** — real `@mlc-ai/web-llm`: a curated **14-model picker** (0.5B → a 70B flagship), tiny/fast to large/accurate, each with its VRAM footprint + a large-download guard; UI default **Llama-3.2-1B**, recommended **Qwen2.5-3B** (multilingual), with `crossOriginIsolated === true` (**GATE A**).
 - **Entity graph + GraphRAG** — LLM-extracted entities/relations persisted as SurrealDB edges; retrieval fuses vector seeds with graph-connected sibling chunks (RRF), incremental via a content hash.
-- **Answer modes** — **Grounded** (default — strict, notes-only, every claim cited and verifiable) and **Reason** (reason *with* the notes and apply general knowledge, still citing what came from the vault), each grounded + cited.
+- **Answer modes** — **Reason** (default — feeds the model the **full relevant note(s)** and reasons over the whole thing, so it can answer about any part of a note, applying general knowledge too) and **Grounded** (strict, chunk-precise, notes-only, every claim cited and verifiable).
 - **Grounded + cited** — e.g. *"The main risk to closing Aurora is that Priya, Northwind's CFO, hasn't approved the budget. [#1]"* with `[#1]` mapped (and click-through) to its source chunk.
 
 ## Screenshots

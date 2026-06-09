@@ -235,10 +235,10 @@
   // Retrieval scope (FR-RET-004) — restrict Ask + Compile to one client (folder/tag).
   let scope = $state<Scope | null>(null);
 
-  // Answer mode (FR-CHAT-005): 'grounded' = strict, notes-only, verifiable (default — answers come
-  // only from your notes); 'reason' = apply general knowledge + reason WITH the notes, and still
-  // answer from world knowledge when the notes have nothing.
-  let answerMode = $state<'grounded' | 'reason'>('grounded');
+  // Answer mode (FR-CHAT-005): 'reason' = the default — feeds the model the FULL relevant note(s) as
+  // context and lets it reason over the whole thing (so it can answer about ANY part of a note, plus
+  // apply general knowledge); 'grounded' = strict, chunk-precise, notes-only, every claim cited.
+  let answerMode = $state<'grounded' | 'reason'>('reason');
 
   // Knowledge graph (Phases 1–4). GraphRAG fuses vector seeds with graph-connected siblings — the
   // lever for the local-LLM quality ceiling. The Entities pane + entity page navigate the persisted
@@ -1556,13 +1556,26 @@
         }
       }
 
+      // REASON reads the FULL note(s), not just the best-matching chunk — so a question can pull
+      // from ANY part of a note (the whole knowledge-base entry IS the context), not only the line
+      // that matched (fixes "Ask can't see past the first line" on long notes). GROUNDED stays
+      // chunk-precise for verifiable citations. Display (References, Micro-Map, Magic Jump) keeps
+      // using the deduped chunk `hits`, so only what's fed to the model changes.
+      const genContext: SearchHit[] =
+        answerMode === 'reason'
+          ? hits.map((h) => {
+              const note = vault.find((n) => n.docId === h.docId);
+              return note ? { ...h, text: note.text, charStart: 0, charEnd: note.text.length } : h;
+            })
+          : hits;
+
       status = 'generating…';
       const res = await pipe.provider.generate(
-        // Reason mode elaborates, so give it more room than the terse grounded answer.
+        // Reason mode elaborates over full notes, so give it more room than the terse grounded answer.
         {
           requestId: 'q',
           query,
-          context: hits,
+          context: genContext,
           modelId,
           maxTokens: answerMode === 'reason' ? 512 : 256,
           answerMode
