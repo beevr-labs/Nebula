@@ -23,6 +23,18 @@ if (typeof window === 'undefined') {
     const req = event.request;
     if (req.cache === 'only-if-cached' && req.mode !== 'same-origin') return;
 
+    // Only re-header our OWN same-origin responses. Under COEP `credentialless` that is all
+    // `crossOriginIsolated` needs — cross-origin model shards (HuggingFace) load untouched. This
+    // also means we never intercept chrome-extension:// or third-party requests (e.g. a browser
+    // extension's content scripts); re-fetching those would fail and spam the console.
+    let url;
+    try {
+      url = new URL(req.url);
+    } catch {
+      return;
+    }
+    if (url.origin !== self.location.origin) return;
+
     event.respondWith(
       fetch(req)
         .then((response) => {
@@ -36,7 +48,12 @@ if (typeof window === 'undefined') {
             headers
           });
         })
-        .catch((e) => console.error('coi-serviceworker fetch error:', e))
+        .catch((e) => {
+          // Hand respondWith() a real Response — never `undefined`, which throws
+          // "Failed to convert value to 'Response'".
+          console.error('coi-serviceworker fetch error:', e);
+          return Response.error();
+        })
     );
   });
 } else {

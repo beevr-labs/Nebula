@@ -61,7 +61,13 @@ export function assemblePrompt(
   hits: SearchHit[],
   opts: AssembleOptions = {}
 ): PromptResult {
-  if (hits.length === 0) {
+  const mode: AnswerMode = opts.mode ?? 'grounded';
+
+  // NO-RESULTS GUARD (PROMPTS §1): only GROUNDED refuses when retrieval is empty — strict RAG must
+  // never answer from outside knowledge, so with no context it returns the no-results line. REASON
+  // deliberately falls through and answers from general knowledge when the notes have nothing —
+  // that's its whole point (an assistant, not a search box; see SYSTEM_PROMPT_REASON).
+  if (hits.length === 0 && mode !== 'reason') {
     return { kind: 'no_results', message: NO_RESULTS_MESSAGE };
   }
 
@@ -80,15 +86,21 @@ export function assemblePrompt(
 
   const contextOrder = included.map((h) => h.chunkId);
   const blocks = included.map((h, i) => chunkBlock(h, i + 1)).join('\n\n');
-  const mode: AnswerMode = opts.mode ?? 'grounded';
+  const hasContext = included.length > 0;
   // The question is embedded in a directive SENTENCE (not under a `# Question` header) so a
   // small model answers it instead of "completing the template" by echoing Question/Answer
   // headers (PROMPTS §1, the echo bug). `stripPromptEcho` is the defensive backstop.
-  const directive =
-    mode === 'reason'
+  let directive: string;
+  if (mode === 'reason') {
+    directive = hasContext
       ? `Using these notes as your main source, reason and apply your knowledge to give a genuinely helpful answer, citing the chunk numbers for anything taken from the notes`
-      : `Using only these notes, answer this question in plain language and cite the chunk numbers you used`;
-  const user = `Notes:\n${blocks}\n\n${directive}: ${query}`;
+      : // Reason + no relevant notes: answer purely from general knowledge (no context to cite).
+        `Answer this question helpfully and accurately using your own knowledge`;
+  } else {
+    directive = `Using only these notes, answer this question in plain language and cite the chunk numbers you used`;
+  }
+  // Omit the empty "Notes:" scaffold when there is no context, so the model isn't told to read notes that aren't there.
+  const user = hasContext ? `Notes:\n${blocks}\n\n${directive}: ${query}` : `${directive}: ${query}`;
   const system = mode === 'reason' ? SYSTEM_PROMPT_REASON : SYSTEM_PROMPT;
 
   return { kind: 'grounded', system, user, contextOrder };

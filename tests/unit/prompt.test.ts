@@ -62,9 +62,22 @@ describe('assemblePrompt', () => {
     }
   });
 
-  it('no-results guard: empty hits → no model call (no fabrication)', () => {
-    const r = assemblePrompt('anything', []);
+  it('no-results guard: grounded + empty hits → no model call (no fabrication)', () => {
+    const r = assemblePrompt('anything', [], { mode: 'grounded' });
     expect(r).toEqual({ kind: 'no_results', message: NO_RESULTS_MESSAGE });
+    expect(assemblePrompt('anything', [])).toEqual(r); // grounded is the default
+  });
+
+  it('reason + empty hits → answers from general knowledge, no notes scaffold (FR-CHAT-005)', () => {
+    const r = assemblePrompt('how many stars are in the solar system?', [], { mode: 'reason' });
+    expect(r.kind).toBe('grounded'); // a real model call, NOT a no-results refusal
+    if (r.kind === 'grounded') {
+      expect(r.system).toBe(SYSTEM_PROMPT_REASON);
+      expect(r.user).not.toContain('Notes:'); // no empty notes scaffold
+      expect(r.user).toContain('using your own knowledge');
+      expect(r.user).toContain('how many stars are in the solar system?');
+      expect(r.contextOrder).toEqual([]);
+    }
   });
 
   it('context budget drops lowest-scoring chunks first, keeping at least one', () => {

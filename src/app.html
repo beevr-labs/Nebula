@@ -7,9 +7,75 @@
          so WebLLM/Transformers.js threaded WASM works without server COOP/COEP headers (ADR-039). Must
          load first; it may reload the page once on first visit to take control. -->
     <script src="%sveltekit.assets%/coi-serviceworker.js"></script>
+    <style>
+      /* App shell shown until SvelteKit hydrates — avoids a blank white screen on first paint
+         (and during coi-serviceworker's one-shot reload). Removed by the script below. */
+      #nebula-splash {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 1rem;
+        background: #0b0d12;
+        color: #9aa4b2;
+        font: 500 0.95rem/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+        z-index: 2147483647;
+      }
+      #nebula-splash .nebula-spinner {
+        width: 36px;
+        height: 36px;
+        border: 3px solid rgba(154, 164, 178, 0.25);
+        border-top-color: #6ea8fe;
+        border-radius: 50%;
+        animation: nebula-spin 0.8s linear infinite;
+      }
+      @keyframes nebula-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #nebula-splash .nebula-spinner {
+          animation-duration: 2s;
+        }
+      }
+    </style>
     %sveltekit.head%
   </head>
   <body data-sveltekit-preload-data="hover">
+    <div id="nebula-splash" aria-hidden="true">
+      <div class="nebula-spinner"></div>
+      <p>Loading Nebula…</p>
+    </div>
     <div style="display: contents">%sveltekit.body%</div>
+    <script>
+      // Remove the splash once SvelteKit has mounted real content into the wrapper.
+      (function () {
+        var splash = document.getElementById('nebula-splash');
+        if (!splash) return;
+        var wrap = splash.nextElementSibling; // the display:contents mount wrapper
+        function done() {
+          if (splash) {
+            splash.remove();
+            splash = null;
+          }
+        }
+        if (wrap) {
+          var obs = new MutationObserver(function () {
+            if (wrap.querySelector(':scope > :not(script)')) {
+              obs.disconnect();
+              done();
+            }
+          });
+          obs.observe(wrap, { childList: true, subtree: true });
+        }
+        // Hard fallback so the splash can never get stuck.
+        window.addEventListener('load', function () {
+          setTimeout(done, 5000);
+        });
+      })();
+    </script>
   </body>
 </html>

@@ -106,30 +106,40 @@
   };
   type Cite = { n: number; chunkId: string; docId: string };
 
+  // Demo vault — the "Aurora deal war-room" from the README: a handful of scattered deal notes that
+  // share entities (Northwind, Project Aurora) but few words, so GraphRAG + Reason can connect them
+  // into a cited plan the way plain keyword search can't. Verbatim with README so docs ↔ app ↔
+  // screenshots stay consistent. Only seeds a brand-new (empty) vault; real notes are never touched.
   const SEED: Note[] = [
     {
-      docId: 'notes/apollo.md',
-      title: 'Apollo',
-      aliases: ['Apollo project', 'dashboard', 'export API'],
-      text: 'The Apollo project will ship to customers in the third quarter of next year. The release adds a new dashboard and an export API for power users.'
+      docId: 'deals/aurora-status.md',
+      title: 'Aurora — status',
+      aliases: ['Project Aurora', 'Aurora', 'Northwind'],
+      text: 'Project Aurora with Northwind is in final negotiation; Dana (our AE) expects signature this quarter.'
     },
     {
-      docId: 'notes/refunds.md',
-      title: 'refund policy',
-      aliases: ['refund', 'refunds'],
-      text: 'Our refund policy lets customers return any product within thirty days of purchase for a full refund, no questions asked.'
+      docId: 'deals/aurora-budget.md',
+      title: 'Aurora — budget',
+      aliases: ['Aurora budget', 'Priya'],
+      text: "Priya, Northwind's CFO, hasn't approved the Aurora budget yet — the main risk to closing."
     },
     {
-      docId: 'notes/security.md',
-      title: 'security',
-      aliases: ['vault data', 'Context Compiler'],
-      text: 'All vault data stays on the local device. Nebula never uploads note content to any server; the Context Compiler is the only path that can export text, and only with consent.'
+      docId: 'deals/aurora-competition.md',
+      title: 'Aurora — competition',
+      aliases: ['Helix', 'Helix Systems'],
+      text: 'Helix Systems undercut us on price for the same Aurora scope.'
     },
     {
-      docId: 'notes/cats.md',
-      title: 'Cats',
-      aliases: ['cat'],
-      text: 'Cats are small domesticated carnivores. They are entirely unrelated to the product roadmap.'
+      docId: 'deals/aurora-poc.md',
+      title: 'Aurora — POC',
+      aliases: ['Orion', 'proof of concept'],
+      text: 'Orion, a Northwind subsidiary, ran the POC and validated performance.'
+    },
+    {
+      docId: 'deals/aurora-champion.md',
+      title: 'Aurora — champion',
+      aliases: ['Sam'],
+      text: "Sam, Northwind's VP of Procurement, champions Aurora and pushes it internally."
     }
   ];
 
@@ -225,9 +235,10 @@
   // Retrieval scope (FR-RET-004) — restrict Ask + Compile to one client (folder/tag).
   let scope = $state<Scope | null>(null);
 
-  // Answer mode (FR-CHAT-005): 'reason' = apply knowledge + reason WITH the notes (default — what
-  // makes it feel like an assistant, not a search box); 'grounded' = strict, notes-only, verifiable.
-  let answerMode = $state<'grounded' | 'reason'>('reason');
+  // Answer mode (FR-CHAT-005): 'grounded' = strict, notes-only, verifiable (default — answers come
+  // only from your notes); 'reason' = apply general knowledge + reason WITH the notes, and still
+  // answer from world knowledge when the notes have nothing.
+  let answerMode = $state<'grounded' | 'reason'>('grounded');
 
   // Knowledge graph (Phases 1–4). GraphRAG fuses vector seeds with graph-connected siblings — the
   // lever for the local-LLM quality ceiling. The Entities pane + entity page navigate the persisted

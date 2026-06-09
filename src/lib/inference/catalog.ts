@@ -68,6 +68,26 @@ export const CHAT_MODELS: ChatModel[] = [
     params: '7B',
     sizeMB: 5107,
     multilingual: true
+  },
+  {
+    id: 'DeepSeek-R1-Distill-Qwen-7B-q4f16_1-MLC',
+    label: 'DeepSeek-R1 7B (reasoning)',
+    params: '7B',
+    sizeMB: 5107
+  },
+  {
+    id: 'Qwen3-8B-q4f16_1-MLC',
+    label: 'Qwen3-8B (multilingual, newest)',
+    params: '8B',
+    sizeMB: 5696,
+    multilingual: true
+  },
+  { id: 'gemma-2-9b-it-q4f16_1-MLC', label: 'Gemma-2-9B (accurate)', params: '9B', sizeMB: 6422 },
+  {
+    id: 'Llama-3.1-70B-Instruct-q3f16_1-MLC',
+    label: 'Llama-3.1-70B (flagship · needs ~32 GB GPU)',
+    params: '70B',
+    sizeMB: 31153
   }
 ];
 
