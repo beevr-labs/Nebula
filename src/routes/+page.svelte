@@ -423,6 +423,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
   let modelId = $state(DEFAULT_MODEL_ID);
   let query = $state('');
   let answer = $state('');
+  let busy = $state(false); // a generation is in flight (declared early — the answer deriveds read it)
   // Multi-turn Ask (FR-CHAT-006): `askedQuery` is the question that produced the CURRENT answer (the
   // composer is cleared on send so a follow-up can be typed); `history` holds the prior completed
   // Q→A turns — replayed into the prompt so a follow-up keeps the thread, and shown as a transcript.
@@ -442,14 +443,23 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
   // Reasoning models emit a <think>…</think> block before the answer. Split it out so the reasoning
   // shows in its own collapsible panel and only the real answer is rendered as Markdown (FR-CHAT).
   const split = $derived(splitReasoning(answer));
-  const reasoning = $derived(split.reasoning);
+  const hasAnswer = $derived(split.content.trim().length > 0);
+  // Reasoning models (Qwen3, DeepSeek-R1) can spend their whole context thinking and stop before
+  // writing an answer — leaving `content` empty. When generation has FINISHED with no answer, fall
+  // back to showing the reasoning as the answer so the user never sees a blank reply (FR-CHAT).
+  const answerFellBack = $derived(!busy && !hasAnswer && split.reasoning.length > 0);
+  const answerSource = $derived(hasAnswer ? split.content : answerFellBack ? split.reasoning : '');
+  // Show the "Thoughts" panel while still thinking, or beside a real answer — but NOT when we've had
+  // to promote the reasoning into the answer slot (that would render it twice).
+  const showThoughts = $derived(split.reasoning.length > 0 && (busy || hasAnswer));
+  const reasoning = $derived(showThoughts ? split.reasoning : '');
   const reasoningHtml = $derived(
-    split.reasoning ? renderMarkdown(split.reasoning, { resolveLink: resolveNoteLink }) : ''
+    reasoning ? renderMarkdown(reasoning, { resolveLink: resolveNoteLink }) : ''
   );
   const answerHtml = $derived(
-    split.content
+    answerSource
       ? linkifyCitations(
-          renderMarkdown(split.content, { resolveLink: resolveNoteLink }),
+          renderMarkdown(answerSource, { resolveLink: resolveNoteLink }),
           citeNumbers
         )
       : ''
@@ -471,7 +481,6 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
   // adds a tab; closing one falls back to a neighbour. `tabDrag` is the docId being reordered.
   let openTabs = $state<string[]>([]);
   let tabDrag = $state<string | null>(null);
-  let busy = $state(false);
   let ttft = $state(0);
   let tps = $state(0);
   let coi = $state(false);
@@ -3140,6 +3149,13 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
               <div class="think-body prose">{@html reasoningHtml}</div>
             </details>
           {/if}
+          {#if answerFellBack}
+            <div class="rail-note">
+              The model kept its whole answer inside its private reasoning and didn't write a
+              separate final answer, so its reasoning is shown below. If this keeps happening, a
+              non-reasoning model (e.g. <strong>Qwen2.5-7B</strong>) answers more reliably.
+            </div>
+          {/if}
           {#if answerHtml}
             <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
             <article
@@ -4756,6 +4772,17 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
   }
   .prose.answer :global(p) {
     margin: 0 0 10px;
+  }
+  /* Heads-up shown when a reasoning model produced no final answer and we fell back to its thoughts. */
+  .rail-note {
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--muted);
+    background: var(--surface-alt);
+    border: 1px solid var(--line);
+    border-radius: var(--r-md);
+    padding: 8px 11px;
+    margin-bottom: 12px;
   }
   /* Reasoning ("Thinking") panel — a subdued, collapsible scratchpad above the real answer. */
   .think {
