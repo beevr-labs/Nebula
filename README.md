@@ -4,150 +4,110 @@
 
 [![Deploy to GitHub Pages](https://github.com/thienzz/Nebula/actions/workflows/deploy.yml/badge.svg)](https://github.com/thienzz/Nebula/actions/workflows/deploy.yml)
 [![Live demo](https://img.shields.io/badge/%E2%96%B6_live_demo-thienzz.github.io%2FNebula-7c5cff)](https://thienzz.github.io/Nebula/)
-[![tests](https://img.shields.io/badge/tests-334_passing-3fb950)](#tests)
-[![backend](https://img.shields.io/badge/backend-none-555)](#architecture)
+[![tests](https://img.shields.io/badge/tests-430+_passing-3fb950)](#under-the-hood)
+[![backend](https://img.shields.io/badge/backend-none-555)](#under-the-hood)
 
-**▶ Try it live — [thienzz.github.io/Nebula](https://thienzz.github.io/Nebula/)** · no install, no account, nothing leaves your browser. The first visit seeds a demo **"Aurora deal war-room"** vault (the [walkthrough below](#-a-deal-war-room--from-scattered-notes-to-a-winning-play)) you can build a knowledge graph over and query offline. *Chat needs a WebGPU browser (Chrome/Edge/Arc, Safari 18+); semantic search works everywhere.*
+**[▶ Open the live demo →](https://thienzz.github.io/Nebula/)** — no install, no sign-up, nothing uploaded. It opens with a small demo vault so you can try everything in about a minute.
 
-Nebula is a private AI knowledge base that runs **entirely in your browser**. Your notes,
-the vector database, the embedding model, and the chat LLM all live in your browser's own storage and run on
-**your** GPU — **zero servers, zero telemetry, zero external calls by default.** No account, no upload, no
-cloud bill. And every note is just a plain `.md` file: one click exports the whole vault as portable
-Markdown — yours to take anywhere — so nothing is ever held hostage.
+---
 
-**Two products in one browser tab:**
+Nebula is a private notes app you can **talk to**. Write or drop in your notes, then ask questions in plain language and get real answers — with links back to the exact note each fact came from.
 
-- 🧠 **The Vault** — write Markdown and hold a *grounded, cited* conversation with your own knowledge, fully
-  offline: semantic search, an on-device chat LLM, an entity **knowledge graph + GraphRAG**, and a full
-  note-taking layer (wikilinks, backlinks, ⌘K quick switcher, daily notes, templates).
-- 🎯 **The Context Engine** — when you *do* want a frontier model, Nebula surfaces the most relevant ~5% of
-  your notes and compiles it into a **token-counted, redactable** block to paste into Claude/GPT. The big
-  model gets concentrated signal, not your whole folder — and you choose exactly what leaves the device.
+The catch? There is none. **Everything runs inside your browser tab.** Your notes, the search, and the AI all live on your own machine. No account. No server. No "your data trains our model." Close the tab and it's still just your files.
 
-> A working build — SvelteKit 5 + WASM (SurrealDB + Transformers.js) + WebGPU (WebLLM), **no
-> backend** — verified end-to-end on real hardware.
+And your notes are never trapped: every note is a plain `.md` text file, and one click exports the whole thing as a folder of Markdown you can open anywhere.
 
-## Status — verified on real hardware (not just mocks)
+## Why you'll like it
 
-The full RAG pipeline runs end-to-end **in a real Chrome tab** on a real GPU — no backend involved:
+- 🔒 **Truly private.** Nothing leaves your device — not your notes, not your questions. Works on a plane, in a café, fully offline.
+- 💬 **Ask, don't dig.** Instead of scrolling through files, just ask *"what did we decide about the budget?"* and get a straight answer with sources.
+- 🕸 **It connects the dots.** Nebula learns who and what your notes are about — people, projects, clients — and pulls in related notes even when they don't share a single keyword.
+- ✍️ **A real notes app too.** Markdown editor, `[[wikilinks]]`, backlinks, tabs, a ⌘K quick switcher, daily notes, templates, tags, folders.
+- 📎 **Bring your files.** Drop in PDFs, CSVs, or text — Nebula reads them and keeps the original untouched.
+- 🚪 **No lock-in.** Plain `.md` files in, plain `.md` files out. Your knowledge is always yours to take.
 
-- **Embeddings** — real **`bge-m3`** (1024-dim, multilingual incl. Vietnamese) via `@huggingface/transformers` (WASM/CPU, in a Web Worker — ADR-021/023).
-- **Vector store** — real **SurrealDB HNSW** cosine index (`@surrealdb/wasm`); `mem://` in Node, **`indxdb://` persistence in the browser (GATE D)**.
-- **PDF** — real text + per-page offsets via `pdfjs-dist`.
-- **WebGPU chat** — real `@mlc-ai/web-llm`: a curated **14-model picker** (0.5B → a 70B flagship), tiny/fast to large/accurate, each with its VRAM footprint + a large-download guard; UI default **Llama-3.2-1B**, recommended **Qwen2.5-3B** (multilingual), with `crossOriginIsolated === true` (**GATE A**).
-- **Entity graph + GraphRAG** — LLM-extracted entities/relations persisted as SurrealDB edges; retrieval fuses vector seeds with graph-connected sibling chunks (RRF), incremental via a content hash.
-- **Answer modes** — **Reason** (default — feeds the model the **full relevant note(s)** and reasons over the whole thing, so it can answer about any part of a note, applying general knowledge too) and **Grounded** (strict, chunk-precise, notes-only, every claim cited and verifiable).
-- **Grounded + cited** — e.g. *"The main risk to closing Aurora is that Priya, Northwind's CFO, hasn't approved the budget. [#1]"* with `[#1]` mapped (and click-through) to its source chunk.
+## What people use it for
 
-## Screenshots
+### 🧠 A "company brain" your team can ask
 
-Every shot below is the same **Aurora deal war-room** vault the [live demo](https://thienzz.github.io/Nebula/) seeds — one consistent, real-world scenario end to end.
-
-| | |
-|:--|:--|
-| <img src="screenshots/vault-tree.png" alt="The vault — five scattered Aurora deal notes in a file tree"><br>**The vault** — five scattered `.md` deal notes (status, budget, competition, POC, champion). | <img src="screenshots/deal-warroom-answer.png" alt="Grounded answer with inline citations to the deal notes"><br>**Ask + GraphRAG** — *"How do we win the Northwind deal?"* → a cited plan synthesised across notes a keyword search would miss. |
-| <img src="screenshots/entity-graph.png" alt="Entity knowledge graph of the deal — people, company, competitor and how they connect"><br>**Knowledge graph** — entities + how they connect (*Priya controls Aurora's budget*, *Sam champions Aurora*, *Helix competes*). | <img src="screenshots/context-compiler.png" alt="Context Compiler dialog with token count, PII scrub and an XML payload"><br>**Context Engine** — compile the relevant slice into a token-counted, redactable block to paste into Claude/GPT. |
-
-## What you can do with it
-
-Drop a folder of notes and Nebula turns it into a **queryable knowledge graph** you can reason over — offline, in the browser.
-
-### 🧠 A "company brain" your team can interrogate
-
-Point it at your org's notes — people, projects, clients, incidents, decisions — and click **✨ build graph**. The on-device LLM reads every note and extracts the entities **and how they connect**. On a 16-note test vault it pulled out **29 entities** (people, projects, clients, products, teams), ranked by how many notes mention them, then let you click any one to see its 2-hop neighbourhood (e.g. *Marcus Chen → 22 connected entities*, with typed relations like *"Atlas Migration **caused** Atlas incident"*). Then ask a connected question:
+Point it at your team's notes — people, projects, clients, incidents, decisions — and Nebula maps out who and what they're about, and how it all connects. Then ask a real question:
 
 > *"What happened in the Atlas incident, who was involved, and what was the follow-up?"*
 
-Plain vector search returns the **2** notes whose wording matches. **GraphRAG adds 5 more** — the people in the escalation chain, the project that caused it, and the security work that followed — surfaced because they're *connected through shared entities*, even though their cosine score (0.21–0.26) sits **below** the relevance floor that plain RAG would drop them at. The answer then synthesises across **7 notes** and cites each. That's retrieval by **connection**, not just by **wording** — the structural context plain RAG misses.
+A plain search finds the two notes that mention "Atlas." Nebula adds the ones that *matter but don't say the word* — the people in the escalation, the project that caused it, the fix that followed — because it knows they're connected. The answer is pulled from all of them, with a source on every point.
 
-Great for onboarding (*"who owns what?"*), incident response (*"who do I loop in?"*), and impact analysis (*"everything that touches Acme Corp"*).
+Perfect for onboarding (*"who owns what?"*), incidents (*"who do I loop in?"*), and impact checks (*"everything that touches Acme Corp"*).
 
-### 🤝 A deal war-room — from scattered notes to a winning play
+### 🤝 A deal war-room — from scattered notes to a game plan
 
-A reproducible walkthrough — and **exactly the vault the [live demo](https://thienzz.github.io/Nebula/) seeds on first visit**, so you can follow along click-for-click. You're closing **Project Aurora** with **Northwind**, and your notes are scattered the way they really are — a status note, a budget note, a competitor note, a POC note, an org-map note:
+This is exactly the vault the [live demo](https://thienzz.github.io/Nebula/) opens with, so you can follow along. You're closing a deal and your notes are scattered the way they really are — a status note, a budget note, a competitor note, and so on:
 
 ```
-deals/aurora-status.md       Project Aurora with Northwind is in final negotiation; Dana (our AE) expects signature this quarter.
-deals/aurora-budget.md       Priya, Northwind's CFO, hasn't approved the Aurora budget yet — the main risk to closing.
-deals/aurora-competition.md  Helix Systems undercut us on price for the same Aurora scope.
-deals/aurora-poc.md          Orion, a Northwind subsidiary, ran the POC and validated performance.
-deals/aurora-champion.md     Sam, Northwind's VP of Procurement, champions Aurora and pushes it internally.
+aurora-status.md       In final negotiation; signature expected this quarter.
+aurora-budget.md       Priya, the client's CFO, hasn't approved the budget — the main risk.
+aurora-competition.md  Helix undercut us on price.
+aurora-poc.md          Orion ran the trial and validated performance.
+aurora-champion.md     Sam, their VP, is pushing the deal internally.
 ```
 
-1. **Build the graph.** Click **✨ build graph**. The on-device LLM reads each note and extracts the entities — *Northwind, Project Aurora, Priya (CFO), Sam (VP), Helix Systems, Orion* — **and how they connect**: *Priya **controls_budget** Aurora*, *Sam **champions** Aurora*, *Helix **competes_with** us*, *Orion **evaluated** the product*.
-2. **Ask** with **🕸 GraphRAG** and **💡 Reason** on:
-   > *"How do we win the Northwind deal — what's blocking it and what should we do?"*
-3. **What comes back.** Plain vector search returns only the *status* note — the budget and champion notes share **no words** with your question. GraphRAG pulls them in anyway, because they share the entities *Northwind* and *Project Aurora*; the model then reasons across them and answers with a **cited plan**:
-   > *Two things block Aurora: CFO **Priya** hasn't cleared the budget [#1], and **Helix** undercut us on price [#3]. To close: (1) work Priya to unblock the budget; (2) neutralise Helix by leaning on **Orion's validated POC** [#4]; (3) mobilise champion **Sam** to push internally [#5].*
+Ask: *"How do we win this deal — what's blocking it and what should we do?"*
 
-The blockers *and* the levers came from notes a keyword search would never surface — retrieval by **connection**, not wording. *(Verified live on a real on-device model — Qwen2.5-3B, WebGPU; the retrieval + reasoning path is covered by `tests/integration/graphrag-flow.test.ts`.)*
+A keyword search only finds the status note; the budget and champion notes don't share any words with your question. Nebula pulls them in anyway — they're about the same deal and people — and answers with a cited plan:
+
+> *Two things block the deal: CFO **Priya** hasn't cleared the budget [#1], and **Helix** undercut us on price [#3]. To close: (1) work Priya to unblock the budget; (2) counter Helix with **Orion's validated trial** [#4]; (3) get champion **Sam** pushing internally [#5].*
+
+The blockers *and* the levers came from notes a keyword search would never surface.
 
 ### 🔒 A private research vault
 
-Thousands of PDFs and notes you can't or won't upload — contracts, papers, source code, journals. Ask in plain language, get cited answers offline, and when you want a frontier model, **Compile Context** hands Claude/GPT a token-counted, redactable slice instead of the raw files.
+Thousands of PDFs and notes you can't or won't upload — contracts, papers, source code. Ask in plain language and get cited answers, all offline. When you do want a frontier model like ChatGPT or Claude, Nebula hands it a tidy, redactable slice instead of the raw files.
 
-### 🧑‍💼 A multi-client consultant's vault
+### 🧑‍💼 One vault, many clients
 
-One vault, many clients. **Scope** a question to a folder or tag so answers never bleed across clients, then compile a per-client context block to share — with a provable no-cross-client-leak guarantee.
+Working across clients? Scope a question to a single folder or tag so answers never bleed from one client into another — then export a per-client slice to share, with nothing else leaking through.
 
-## Quick start — it runs in your browser
+## Try it on your machine
 
 ```bash
 npm install
-npm run dev              # open http://localhost:1420 — the full app, in a cross-origin-isolated tab
+npm run dev          # then open http://localhost:1420
 ```
 
-That's the whole setup. `npm run dev` serves the app with the COOP/COEP headers it needs for WebGPU, and
-you're writing notes immediately. First run downloads the models **once** into your browser cache (≈570 MB
-embedder + the chat model you pick); after that it works offline. **Semantic search needs no GPU** (WASM/CPU);
-local **chat** wants a WebGPU browser (Chrome/Edge/Arc, Safari 18+, Firefox rolling out) — on any OS, macOS included.
+That's the whole setup — you're writing notes immediately. The first time you ask a question, Nebula downloads its AI models **once** into your browser (about 570 MB for search, plus whichever chat model you pick). After that it works offline.
 
-## Deploy it (host the tab anywhere)
+**Search works on any modern browser**, no special hardware. The **chat** part uses your GPU, so it wants a recent Chrome, Edge, Arc, or Safari 18+ (Firefox support is rolling out) — on any OS, Mac included.
 
-`npm run build` emits a static SvelteKit site in `build/`. It needs exactly two response headers to unlock
-`crossOriginIsolated` (required for WebGPU + threaded WASM):
+## Put it online
+
+`npm run build` produces a plain static site in `build/` you can host anywhere. It needs two response headers (so the browser can use your GPU safely):
 
 ```
 Cross-Origin-Opener-Policy: same-origin
 Cross-Origin-Embedder-Policy: credentialless
 ```
 
-- **GitHub Pages (included, zero-config):** push to `main` → [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml)
-  builds and publishes to `https://<user>.github.io/Nebula/`. Pages can't set headers, so a vendored
-  [`coi-serviceworker`](static/coi-serviceworker.js) injects them client-side (ADR-039). **One-time setup:** repo
-  **Settings → Pages → Source = "GitHub Actions"** (and keep the workflow's `BASE_PATH` matching the repo name).
-- **Hosts with header config** (Cloudflare Pages / Netlify / Vercel) — drop a `_headers` file with those two
-  lines and set `BASE_PATH=''` (root); the service worker becomes optional.
-- **Your data lives in the browser origin** (IndexedDB + Cache Storage): it survives refreshes but is per-browser/per-profile — so **Export Vault** (a one-click `.zip` of your `.md` notes + original files) is both your backup and your exit. Your knowledge is never locked in.
+- **GitHub Pages — zero config (included):** push to `main` and the [bundled workflow](.github/workflows/deploy.yml) builds and publishes to `https://<you>.github.io/Nebula/`. One-time: **Settings → Pages → Source = "GitHub Actions."**
+- **Cloudflare Pages / Netlify / Vercel:** add a `_headers` file with the two lines above.
+- **Your data lives in your browser** and stays there. It survives refreshes but is tied to that browser — so **Export Vault** (a one-click `.zip` of your notes + original files) is both your backup and your way out. Nothing is ever locked in.
 
-## Tests
+## Under the hood
+
+For the curious — Nebula is a single-page app with **no backend at all**. Everything that would normally be a server (the search engine, the AI, the database) runs inside the browser tab:
+
+- **Built with** SvelteKit, with the heavy lifting done by WebAssembly and your GPU.
+- **Search** understands meaning, not just keywords (multilingual, including Vietnamese), and runs even without a GPU.
+- **Chat** runs a real language model locally on your GPU — pick from tiny-and-fast to large-and-accurate, each showing its size before you download.
+- **Your notes are the source of truth.** The search index is just a cache Nebula can rebuild any time; Export Vault always hands you the real `.md` files.
+
+It's covered by **430+ automated tests**, run with:
 
 ```bash
-npm run lint && npm run check     # eslint + prettier + svelte-check
-npm run test:unit                 # pure logic (fast, offline)
-npm run test:int                  # integration incl. real pdfjs + real SurrealDB (offline)
-npm run test:models               # real bge-m3 embeddings (downloads ~570 MB first run)
-cargo test --manifest-path src-tauri/Cargo.toml   # Rust: fs_scope, model hash verify
+npm run lint && npm run check     # formatting + types
+npm run test:unit                 # core logic (fast, offline)
+npm run test:int                  # real PDF + database, offline
+npm run test:models               # real search models (downloads ~570 MB first run)
 ```
 
-334+ automated tests across TypeScript and Rust. CI uses the `InferenceProvider` mock (no GPU);
-WebGPU chat runs on a real GPU box or a driven browser.
+---
 
-Nebula ingests **PDF / CSV / TXT / MD**; every import becomes a portable **Markdown Proxy Note**
-(`notes/<stem>.md` with a `source:` backlink) over the untouched original in `sources/`, so
-Export Vault round-trips 1:1 to portable Markdown — open it in any editor.
-
-The **note-taking layer** (Export Vault, the Weaver auto-wikilinks, the Micro-Map retrieval
-sub-graph, lazy-YAML auto-tagging, Magic Jump) has its cores implemented, wired into the app, and
-live-verified. Note authoring (create / edit / rename /
-move / delete), daily notes + templates, a file tree + tag pane, backlinks + unlinked mentions, a Ctrl/⌘-K
-quick switcher, and per-folder/tag scope for the Context Compiler all ship in the app.
-
-## Architecture
-
-`InferenceProvider` (ADR-001) is the seam: `WebLLMProvider` (WebGPU, Phase 1) and a deterministic mock
-implement it identically, so product logic never depends on the GPU. The SurrealDB index is a rebuildable
-**derived cache** — your note bodies are the source of truth, and **Export Vault** hands you the whole thing
-as plain `.md` any time (nothing is locked inside a browser store).
-
-> Stable identifiers (`FR-`, `US-`, `TC-`, `T-`, `ADR-`) thread through the code — grep them.
+**[▶ Try Nebula now →](https://thienzz.github.io/Nebula/)** — your notes, finally answering back.
