@@ -39,8 +39,6 @@ The full RAG pipeline runs end-to-end **in a real Chrome tab** on a real GPU —
 - **Answer modes** — **Grounded** (default — strict, notes-only, every claim cited and verifiable) and **Reason** (reason *with* the notes and apply general knowledge, still citing what came from the vault), each grounded + cited.
 - **Grounded + cited** — e.g. *"The main risk to closing Aurora is that Priya, Northwind's CFO, hasn't approved the budget. [#1]"* with `[#1]` mapped (and click-through) to its source chunk.
 
-See [`BUILD-PROGRESS.md`](BUILD-PROGRESS.md) for the slice-by-slice build log.
-
 ## Screenshots
 
 Every shot below is the same **Aurora deal war-room** vault the [live demo](https://thienzz.github.io/Nebula/) seeds — one consistent, real-world scenario end to end.
