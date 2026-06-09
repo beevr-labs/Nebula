@@ -19,12 +19,20 @@ export interface RenderOptions {
  * matches the literal `[#digits]` pattern, which `renderMarkdown` already passes through verbatim
  * (escapeHtml leaves `[`, `#`, `]`, and digits untouched), so it composes with rendered Markdown HTML
  * without re-parsing it. The caller maps `data-cite` → chunkId at click time. ALGORITHMS §18.
+ *
+ * When `valid` is supplied (the set of citation numbers that actually map to a retrieved source —
+ * i.e. the `references` shown to the user), markers OUTSIDE that set are STRIPPED, not linkified: a
+ * small model often emits `[#5]` when only 2 chunks were retrieved (or invents citations for an
+ * ungrounded answer), and those would otherwise render as dead buttons that jump to nothing
+ * (FR-CHAT-002/003). The preceding whitespace is swallowed with the marker so stripping doesn't
+ * leave a double space or a space before punctuation. Omit `valid` to linkify every marker (the
+ * raw, unvalidated behavior).
  */
-export function linkifyCitations(html: string): string {
-  return html.replace(
-    /\[#(\d+)\]/g,
-    (_m, n: string) => `<button type="button" class="cite" data-cite="${n}">[#${n}]</button>`
-  );
+export function linkifyCitations(html: string, valid?: ReadonlySet<number>): string {
+  return html.replace(/(\s*)\[#(\d+)\]/g, (_m, ws: string, n: string) => {
+    if (valid && !valid.has(Number(n))) return ''; // hallucinated / out-of-range → drop, never render
+    return `${ws}<button type="button" class="cite" data-cite="${n}">[#${n}]</button>`;
+  });
 }
 
 /** Escape the five HTML-significant characters. Applied to ALL source-derived text. */

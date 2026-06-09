@@ -19,6 +19,10 @@ export interface GenerateRequest {
   modelId: string;
   maxTokens: number;
   answerMode?: 'grounded' | 'reason'; // strict RAG vs reason-with-the-notes (FR-CHAT-005)
+  // Prior Q→A turns of this Ask conversation, replayed so a follow-up keeps the thread (FR-CHAT-006).
+  // Empty/omitted for the first question. Each turn's grounding context is NOT re-sent — only the
+  // running dialogue — while THIS turn carries its own freshly-retrieved context.
+  history?: { query: string; answer: string }[];
 }
 
 export interface GenerateResult {

@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   assemblePrompt,
+  buildChatMessages,
+  normalizeCitationMarkers,
   parseCitations,
   stripPromptEcho,
   SYSTEM_PROMPT,
@@ -31,6 +33,65 @@ const hits: SearchHit[] = [
     score: 0.6
   }
 ];
+
+describe('normalizeCitationMarkers', () => {
+  it('repairs a colon-prefixed marker the model emitted (the live [:#5] bug)', () => {
+    expect(normalizeCitationMarkers('The CFO is the blocker [:#5].')).toBe(
+      'The CFO is the blocker [#5].'
+    );
+  });
+
+  it('repairs spaced / labeled markers but leaves canonical ones untouched', () => {
+    expect(normalizeCitationMarkers('a [ #3] b [#4] c [ref #2]')).toBe('a [#3] b [#4] c [#2]');
+  });
+
+  it('then parses into real citations against the context order', () => {
+    const order = ['k1', 'k2', 'k3', 'k4', 'k5'];
+    const { citations } = parseCitations(normalizeCitationMarkers('See [:#3] and [:#5].'), order);
+    expect(citations.map((c) => c.chunkId)).toEqual(['k3', 'k5']);
+  });
+
+  it('leaves a bare [3] alone (ambiguous with footnotes / list markers)', () => {
+    expect(normalizeCitationMarkers('step [3] of the plan')).toBe('step [3] of the plan');
+  });
+
+  it('is idempotent', () => {
+    const once = normalizeCitationMarkers('[:#1][#2]');
+    expect(normalizeCitationMarkers(once)).toBe(once);
+    expect(once).toBe('[#1][#2]');
+  });
+});
+
+describe('buildChatMessages (FR-CHAT-006 multi-turn)', () => {
+  it('is a plain single-turn pair when there is no history', () => {
+    const msgs = buildChatMessages('SYS', 'USER');
+    expect(msgs).toEqual([
+      { role: 'system', content: 'SYS' },
+      { role: 'user', content: 'USER' }
+    ]);
+  });
+
+  it('replays prior turns as user/assistant pairs, then the current grounded user message', () => {
+    const msgs = buildChatMessages('SYS', 'CURRENT', [
+      { query: 'Q1', answer: 'A1' },
+      { query: 'Q2', answer: 'A2' }
+    ]);
+    expect(msgs.map((m) => m.role)).toEqual([
+      'system',
+      'user',
+      'assistant',
+      'user',
+      'assistant',
+      'user'
+    ]);
+    expect(msgs.map((m) => m.content)).toEqual(['SYS', 'Q1', 'A1', 'Q2', 'A2', 'CURRENT']);
+  });
+
+  it('keeps the current grounded message last so retrieval context anchors the new answer', () => {
+    const msgs = buildChatMessages('SYS', 'CURRENT', [{ query: 'Q1', answer: 'A1' }]);
+    expect(msgs[msgs.length - 1]).toEqual({ role: 'user', content: 'CURRENT' });
+  });
+});
 
 describe('assemblePrompt', () => {
   it('builds a grounded prompt with numbered context and the question', () => {

@@ -8,7 +8,7 @@ import type {
   GenerateResult,
   Backend
 } from '$lib/inference/provider';
-import { parseCitations, NO_RESULTS_MESSAGE } from '$lib/chat/prompt';
+import { normalizeCitationMarkers, parseCitations, NO_RESULTS_MESSAGE } from '$lib/chat/prompt';
 
 export class MockInferenceProvider implements InferenceProvider {
   readonly id = 'webllm' as const;
@@ -44,7 +44,7 @@ export class MockInferenceProvider implements InferenceProvider {
     }
 
     const contextOrder = req.context.map((c) => c.chunkId);
-    const { citations } = parseCitations(text, contextOrder);
+    const { citations } = parseCitations(normalizeCitationMarkers(text), contextOrder);
 
     return {
       requestId: req.requestId,

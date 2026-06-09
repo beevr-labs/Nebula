@@ -12,7 +12,8 @@
   import { buildTitleIndex, notePreview } from '$lib/weave/weaver';
   import { buildMicroGraph, type MicroGraph } from '$lib/graph/micrograph';
   import { selectGraphRagContext } from '$lib/retrieval/graphrag';
-  import { ingestDocGraph } from '$lib/graph/ingest-graph';
+  import { ingestDocGraph, seedDocGraph } from '$lib/graph/ingest-graph';
+  import type { Extraction, ExtractedRelation } from '$lib/graph/entities';
   import { buildEntityIndex, type EntityEntry } from '$lib/graph/entity-index';
   import { buildEntityGraph, type EntityGraph, type GraphNeighbor } from '$lib/graph/entity-graph';
   import type { EntityRecord, MentionEdge, RelationEdge } from '$lib/graph/types';
@@ -75,8 +76,12 @@
   import { scopeDocIds, filterByScope, scopeLabel, type Scope } from '$lib/retrieval/scope';
   import {
     dedupeByDoc,
+    entityAnchorDocs,
+    hybridRerank,
+    queryTerms,
     referencesFromHits,
     relevantHits,
+    restrictToEntities,
     type SourceRef
   } from '$lib/retrieval/search';
   import { sourcesFromNotes, sourcesFromHits, parseRedactions } from '$lib/context/sources';
@@ -107,42 +112,287 @@
   };
   type Cite = { n: number; chunkId: string; docId: string };
 
-  // Demo vault — the "Aurora deal war-room" from the README: a handful of scattered deal notes that
-  // share entities (Northwind, Project Aurora) but few words, so GraphRAG + Reason can connect them
-  // into a cited plan the way plain keyword search can't. Verbatim with README so docs ↔ app ↔
-  // screenshots stay consistent. Only seeds a brand-new (empty) vault; real notes are never touched.
+  // Demo vault — a friendly, two-topic onboarding TOUR for a brand-new user. Two little notebooks with
+  // NO shared entities ("Japan trip with friends" in trip/ and a "sleep research" notebook in
+  // research/) so Scope isolates them cleanly; within each, notes share people/places/ideas but few
+  // words, so GraphRAG + Reason connect them the way keyword search can't (e.g. "Sakura Inn" links the
+  // Kyoto note to the budget note). `start-here` is the guided tour itself. Only seeds an empty vault;
+  // real notes are never touched — the user can delete all of this and start their own.
+  const TOUR_DOC = 'start-here.md'; // the onboarding tour note — visible/editable but NOT RAG-indexed
   const SEED: Note[] = [
     {
-      docId: 'deals/aurora-status.md',
-      title: 'Aurora — status',
-      aliases: ['Project Aurora', 'Aurora', 'Northwind'],
-      text: 'Project Aurora with Northwind is in final negotiation; Dana (our AE) expects signature this quarter.'
+      docId: 'start-here.md',
+      title: '👋 Start here',
+      aliases: ['Welcome', 'Start', 'Tour'],
+      text: `# 👋 Welcome to Nebula
+
+Nebula turns your notes into something you can **ask** — and everything runs **on your device**, so nothing ever leaves your computer.
+
+This demo has two little notebooks so you can see what it does: a **Japan trip** with friends (\`trip/\`) and a **sleep research** notebook (\`research/\`). Try the things below, then delete it all and make it your own.
+
+## 1 · Ask your notes  (press ⌘J)
+- **Synthesize across notes:** *"What does each friend want to do in Japan?"*
+- **Add up the numbers:** *"What's the total budget per person for the trip?"*
+- **Reason, don't just quote** (Reason mode): *"Based on my sleep notes, what should I change in my routine?"*
+- **Follow up:** after an answer, ask *"and why?"* — it remembers the conversation.
+- **Cited & verifiable:** answers show [#1] markers — click one to jump to the exact note.
+
+## 2 · See the knowledge graph  (Graph tab → Build entity graph)
+Nebula links your notes through shared **people, places and ideas**, even when they share no words.
+- Open the **Graph** tab, click **Build entity graph**, then open an entity like **Maya** or **caffeine** — you'll see every note connected to it.
+- In Ask, try *"What is Maya planning across the whole trip?"* — it gathers every note she appears in.
+
+## 3 · Keep topics apart  (Scope)
+Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only ever get trip notes, never your research.
+
+## 4 · Make it yours
+- **New note** to write; link notes with \`[[double brackets]]\`; tag with \`#hashtags\`.
+- Drop in a **PDF or CSV** and it becomes searchable too.
+
+#welcome`
+    },
+
+    // ── Japan trip with friends ───────────────────────────────────────────────
+    {
+      docId: 'trip/overview.md',
+      title: 'Japan trip — overview',
+      aliases: ['Japan trip', 'Japan'],
+      text: 'Our 10-day Japan trip in April with Maya, Leo and Priya. The route is Tokyo → Kyoto → Osaka, plus a day trip to [[Hakone]]. Flights are booked and the budget target is about $1,900 each. #japan #trip'
     },
     {
-      docId: 'deals/aurora-budget.md',
-      title: 'Aurora — budget',
-      aliases: ['Aurora budget', 'Priya'],
-      text: "Priya, Northwind's CFO, hasn't approved the Aurora budget yet — the main risk to closing."
+      docId: 'trip/tokyo.md',
+      title: 'Tokyo',
+      aliases: ['Tokyo', 'Shinjuku'],
+      text: 'In Tokyo (3 nights) we stay in Shinjuku. Maya wants teamLab Planets and Leo wants the Tsukiji fish market. From here we take a day trip to [[Hakone]]. #japan'
     },
     {
-      docId: 'deals/aurora-competition.md',
-      title: 'Aurora — competition',
-      aliases: ['Helix', 'Helix Systems'],
-      text: 'Helix Systems undercut us on price for the same Aurora scope.'
+      docId: 'trip/kyoto.md',
+      title: 'Kyoto',
+      aliases: ['Kyoto', 'Sakura Inn', 'ryokan'],
+      text: 'Kyoto (4 nights) is the temple leg: Fushimi Inari at dawn and the Arashiyama bamboo grove. Priya booked a traditional ryokan called Sakura Inn for two of the nights. #japan'
     },
     {
-      docId: 'deals/aurora-poc.md',
-      title: 'Aurora — POC',
-      aliases: ['Orion', 'proof of concept'],
-      text: 'Orion, a Northwind subsidiary, ran the POC and validated performance.'
+      docId: 'trip/osaka.md',
+      title: 'Osaka',
+      aliases: ['Osaka', 'Dotonbori'],
+      text: 'Osaka (2 nights) is the food leg — Dotonbori street food and okonomiyaki. Leo is our foodie and is planning this part. #japan'
     },
     {
-      docId: 'deals/aurora-champion.md',
-      title: 'Aurora — champion',
-      aliases: ['Sam'],
-      text: "Sam, Northwind's VP of Procurement, champions Aurora and pushes it internally."
+      docId: 'trip/hakone.md',
+      title: 'Hakone day trip',
+      aliases: ['Hakone'],
+      text: 'A day trip to Hakone from Tokyo: Lake Ashi, the open-air museum and an onsen. Note: Maya is allergic to eggs, so we skip the famous black eggs. #japan'
+    },
+    {
+      docId: 'trip/budget.md',
+      title: 'Trip budget',
+      aliases: ['budget', 'JR Pass'],
+      text: 'Budget per person: flights $700, hotels $500, food $400, and a JR Pass for transport $300 — that comes to about $1,900 each. Maya already paid the Sakura Inn deposit of $150 on behalf of the group. #japan #money'
+    },
+    {
+      docId: 'trip/preferences.md',
+      title: 'What everyone wants',
+      aliases: ['preferences'],
+      text: 'Maya loves art and quiet temples. Leo lives for food and nightlife. Priya wants culture and shopping. We try to fit one thing for each person into every day. #japan'
+    },
+
+    // ── Sleep research notebook ───────────────────────────────────────────────
+    {
+      docId: 'research/overview.md',
+      title: 'Sleep — overview',
+      aliases: ['sleep', 'sleep research'],
+      text: 'Notes on why sleep works the way it does. Two systems drive it: the circadian rhythm (a daily body clock) and sleep pressure (a chemical that builds up while you are awake). #sleep #research'
+    },
+    {
+      docId: 'research/circadian.md',
+      title: 'Circadian rhythm',
+      aliases: ['circadian rhythm', 'circadian', 'SCN'],
+      text: 'The circadian rhythm is a ~24-hour clock set mainly by light and run by the SCN in the hypothalamus. Morning light shifts it earlier; bright evening light shifts it later. #sleep'
+    },
+    {
+      docId: 'research/adenosine.md',
+      title: 'Sleep pressure & adenosine',
+      aliases: ['adenosine', 'sleep pressure'],
+      text: 'Sleep pressure comes from adenosine, which builds up in the brain the longer you stay awake and makes you drowsy. It clears out again while you sleep. #sleep'
+    },
+    {
+      docId: 'research/caffeine.md',
+      title: 'Caffeine',
+      aliases: ['caffeine', 'coffee'],
+      text: 'Caffeine works by blocking adenosine receptors, masking drowsiness. Its half-life is about 5–6 hours, so an afternoon coffee can still be active at bedtime. #sleep'
+    },
+    {
+      docId: 'research/melatonin.md',
+      title: 'Melatonin',
+      aliases: ['melatonin', 'pineal gland'],
+      text: 'Melatonin is released by the pineal gland when it gets dark and signals "night" to the body. Bright light in the evening suppresses it and pushes sleep later. #sleep'
+    },
+    {
+      docId: 'research/why-we-sleep.md',
+      title: 'Why We Sleep (notes)',
+      aliases: ['Matthew Walker', 'Why We Sleep'],
+      text: 'From "Why We Sleep" by Matthew Walker: deep NREM sleep helps consolidate memories, while REM sleep supports emotional regulation — both stages matter. #sleep #book'
+    },
+    {
+      docId: 'research/takeaways.md',
+      title: 'Sleep — what to actually do',
+      aliases: ['sleep tips', 'takeaways'],
+      text: 'Putting it together: get morning sunlight (it sets the circadian rhythm), stop caffeine after about 2 PM (its half-life is long), and dim the lights at night (to protect melatonin). #sleep'
     }
   ];
+
+  // A HAND-AUTHORED knowledge graph for the seed notes (FR-GRAPH-001), keyed by docId. Seeding this
+  // directly means a first-run user sees the full entity graph INSTANTLY — without loading the chat
+  // model and running LLM extraction. Each entity name must appear (as a substring) in its note's
+  // text so the chunk-level mention edges attach; entities sharing a name across notes merge into one
+  // node (e.g. "Sakura Inn" links Kyoto↔budget; "Maya" is a hub; "adenosine" links the caffeine note
+  // to the sleep-pressure note) — the same cross-note links GraphRAG rides on. The two topics share
+  // NO entities, so the graph stays cleanly split between trip/ and research/.
+  const r = (source: string, target: string, type: string): ExtractedRelation => ({
+    source,
+    target,
+    type,
+    confidence: 0.95
+  });
+  const SEED_GRAPH: Record<string, Extraction> = {
+    'trip/overview.md': {
+      entities: [
+        { name: 'Maya', type: 'person' },
+        { name: 'Leo', type: 'person' },
+        { name: 'Priya', type: 'person' },
+        { name: 'Tokyo', type: 'place' },
+        { name: 'Kyoto', type: 'place' },
+        { name: 'Osaka', type: 'place' },
+        { name: 'Hakone', type: 'place' }
+      ],
+      relations: []
+    },
+    'trip/tokyo.md': {
+      entities: [
+        { name: 'Tokyo', type: 'place' },
+        { name: 'Shinjuku', type: 'place' },
+        { name: 'Maya', type: 'person' },
+        { name: 'teamLab Planets', type: 'place' },
+        { name: 'Leo', type: 'person' },
+        { name: 'Tsukiji', type: 'place' },
+        { name: 'Hakone', type: 'place' }
+      ],
+      relations: [
+        r('Maya', 'teamLab Planets', 'wants_to_visit'),
+        r('Leo', 'Tsukiji', 'wants_to_visit')
+      ]
+    },
+    'trip/kyoto.md': {
+      entities: [
+        { name: 'Kyoto', type: 'place' },
+        { name: 'Fushimi Inari', type: 'place' },
+        { name: 'Arashiyama', type: 'place' },
+        { name: 'Priya', type: 'person' },
+        { name: 'Sakura Inn', type: 'org' }
+      ],
+      relations: [r('Priya', 'Sakura Inn', 'booked'), r('Sakura Inn', 'Kyoto', 'located_in')]
+    },
+    'trip/osaka.md': {
+      entities: [
+        { name: 'Osaka', type: 'place' },
+        { name: 'Dotonbori', type: 'place' },
+        { name: 'Leo', type: 'person' },
+        { name: 'food', type: 'concept' }
+      ],
+      relations: [r('Leo', 'Osaka', 'plans'), r('Leo', 'food', 'likes')]
+    },
+    'trip/hakone.md': {
+      entities: [
+        { name: 'Hakone', type: 'place' },
+        { name: 'Tokyo', type: 'place' },
+        { name: 'Lake Ashi', type: 'place' },
+        { name: 'Maya', type: 'person' }
+      ],
+      relations: [r('Hakone', 'Tokyo', 'day_trip_from')]
+    },
+    'trip/budget.md': {
+      entities: [
+        { name: 'Maya', type: 'person' },
+        { name: 'Sakura Inn', type: 'org' },
+        { name: 'JR Pass', type: 'other' }
+      ],
+      relations: [r('Maya', 'Sakura Inn', 'paid_deposit')]
+    },
+    'trip/preferences.md': {
+      entities: [
+        { name: 'Maya', type: 'person' },
+        { name: 'Leo', type: 'person' },
+        { name: 'Priya', type: 'person' },
+        { name: 'art', type: 'concept' },
+        { name: 'food', type: 'concept' },
+        { name: 'shopping', type: 'concept' }
+      ],
+      relations: [
+        r('Maya', 'art', 'likes'),
+        r('Leo', 'food', 'likes'),
+        r('Priya', 'shopping', 'likes')
+      ]
+    },
+    'research/overview.md': {
+      entities: [
+        { name: 'circadian rhythm', type: 'concept' },
+        { name: 'sleep pressure', type: 'concept' },
+        { name: 'sleep', type: 'concept' }
+      ],
+      relations: [
+        r('circadian rhythm', 'sleep', 'regulates'),
+        r('sleep pressure', 'sleep', 'regulates')
+      ]
+    },
+    'research/circadian.md': {
+      entities: [
+        { name: 'circadian rhythm', type: 'concept' },
+        { name: 'SCN', type: 'concept' },
+        { name: 'hypothalamus', type: 'place' },
+        { name: 'light', type: 'concept' }
+      ],
+      relations: [r('SCN', 'circadian rhythm', 'controls'), r('light', 'circadian rhythm', 'sets')]
+    },
+    'research/adenosine.md': {
+      entities: [
+        { name: 'sleep pressure', type: 'concept' },
+        { name: 'adenosine', type: 'concept' }
+      ],
+      relations: [r('adenosine', 'sleep pressure', 'causes')]
+    },
+    'research/caffeine.md': {
+      entities: [
+        { name: 'caffeine', type: 'concept' },
+        { name: 'adenosine', type: 'concept' }
+      ],
+      relations: [r('caffeine', 'adenosine', 'blocks')]
+    },
+    'research/melatonin.md': {
+      entities: [
+        { name: 'melatonin', type: 'concept' },
+        { name: 'pineal gland', type: 'concept' },
+        { name: 'light', type: 'concept' }
+      ],
+      relations: [r('pineal gland', 'melatonin', 'releases'), r('light', 'melatonin', 'suppresses')]
+    },
+    'research/why-we-sleep.md': {
+      entities: [
+        { name: 'Why We Sleep', type: 'other' },
+        { name: 'Matthew Walker', type: 'person' },
+        { name: 'NREM', type: 'concept' },
+        { name: 'REM', type: 'concept' }
+      ],
+      relations: [r('Matthew Walker', 'Why We Sleep', 'wrote')]
+    },
+    'research/takeaways.md': {
+      entities: [
+        { name: 'circadian rhythm', type: 'concept' },
+        { name: 'caffeine', type: 'concept' },
+        { name: 'melatonin', type: 'concept' }
+      ],
+      relations: []
+    }
+  };
 
   const MODELS = CHAT_MODELS; // curated tiny→large picker with VRAM labels + OOM guard (catalog.ts)
 
@@ -172,15 +422,32 @@
   let modelId = $state(DEFAULT_MODEL_ID);
   let query = $state('Does Nebula upload my notes to a server?');
   let answer = $state('');
+  // Multi-turn Ask (FR-CHAT-006): `askedQuery` is the question that produced the CURRENT answer (the
+  // composer is cleared on send so a follow-up can be typed); `history` holds the prior completed
+  // Q→A turns — replayed into the prompt so a follow-up keeps the thread, and shown as a transcript.
+  let askedQuery = $state('');
+  let history = $state<{ query: string; answer: string }[]>([]);
   // The answer rendered as safe Markdown HTML (FR-CHAT-001) with clickable [#n] citations woven in —
   // headings, lists, bold, tables format properly instead of showing raw Markdown. Magic Jump on a
   // [#n] resolves via `references` (onRenderedClick). Empty until an answer streams in.
-  const answerHtml = $derived(
-    answer ? linkifyCitations(renderMarkdown(answer, { resolveLink: resolveNoteLink })) : ''
-  );
   let cites = $state<Cite[]>([]);
   let hits = $state<SearchHit[]>([]);
   let references = $state<SourceRef[]>([]); // distinct source docs behind the answer (FR-CHAT-002)
+  // Only the citation numbers that map to a real retrieved source (the `references` panel) may render
+  // as a live [#n] button. A small model often emits extra markers (e.g. [#5] when 2 sources exist,
+  // or invents citations on an ungrounded answer); those are stripped so the user never sees a
+  // citation that jumps to nothing (FR-CHAT-002/003).
+  const citeNumbers = $derived(new Set(references.map((r) => r.n)));
+  const answerHtml = $derived(
+    answer
+      ? linkifyCitations(renderMarkdown(answer, { resolveLink: resolveNoteLink }), citeNumbers)
+      : ''
+  );
+  // Past turns in the transcript keep their prose but DROP citation buttons: their retrieved `hits`
+  // are no longer held, so Magic Jump couldn't resolve them — an empty valid set strips the markers.
+  const NO_CITES: ReadonlySet<number> = new Set();
+  const pastAnswerHtml = (a: string): string =>
+    linkifyCitations(renderMarkdown(a, { resolveLink: resolveNoteLink }), NO_CITES);
   let graph = $state<MicroGraph | null>(null);
   let activeDoc = $state<string | null>(null);
   let activeSpan = $state<{ charStart: number; charEnd: number } | null>(null);
@@ -219,6 +486,10 @@
   let indexRunning = false;
   let bgPending = $state(0); // notes waiting/being indexed (drives the unobtrusive header indicator)
   let bgProgress = $state(''); // e.g. "apollo 32/66" for the current job
+  // Set when a background index couldn't extract a note's entity graph because no model was loaded —
+  // the embeddings (and plain RAG) still land, but the graph is now behind. Drives a non-blocking
+  // "Build graph" hint in the Entities pane; cleared by a successful buildVaultGraph (FR-GRAPH-001).
+  let graphStale = $state(false);
   let bodyEl = $state<HTMLTextAreaElement>();
   let wlState = $state<AutocompleteState | null>(null); // wikilink autocomplete (FR-LINK-003)
 
@@ -347,6 +618,7 @@
       entityIds: string[];
     }>;
     indexGraph: (docId: string, text: string) => Promise<number>;
+    seedGraph: (docId: string, text: string, extraction: Extraction) => Promise<number>;
     clearGraph: (docId: string) => Promise<void>;
     entityData: () => Promise<{
       entities: EntityRecord[];
@@ -369,6 +641,7 @@
           modelId: string;
           maxTokens: number;
           answerMode: 'grounded' | 'reason';
+          history?: { query: string; answer: string }[];
         },
         onTok: (t: string) => void,
         sig: AbortSignal
@@ -484,7 +757,23 @@
           sourcePath: note.sourcePath,
           frontmatter: note.frontmatter
         });
-        await indexNote(note.docId, note.text);
+        // The onboarding tour note is META (it literally CONTAINS the example questions). Indexing it
+        // would make every suggested question self-match the tour as its top hit — crowding out the
+        // real notes AND raising the relevance floor so they get dropped. So persist it (it's visible
+        // + editable) but never embed it into the RAG index. Same reason it's skipped in the graph.
+        if (note.docId !== TOUR_DOC) await indexNote(note.docId, note.text);
+        // Seed the PRE-BUILT graph for this note (entities + mentions + relations) with no LLM, so the
+        // demo's knowledge graph is ready the instant the vault loads — the user never waits for the
+        // chat model to load + extract. Runs after indexNote so the chunks exist for mention edges.
+        const ex = SEED_GRAPH[note.docId];
+        if (ex) await seedDocGraph(store, note.docId, note.text, ex);
+      }
+      // First run: greet the user with the guided "Start here" tour (read view) instead of a blank
+      // editor, so they immediately see what the app can do and what to try.
+      if (vault.some((n) => n.docId === TOUR_DOC)) {
+        activeDoc = TOUR_DOC;
+        mode = 'ask';
+        rightView = 'files';
       }
     }
 
@@ -502,12 +791,21 @@
     // plain RAG) are unaffected. With a model loaded, skim → extract → resolve → persist with
     // chunk-level provenance so GraphRAG can later expand on shared entities.
     // Thin adapter over ingestDocGraph (graph/ingest-graph.ts) — keeps the legacy numeric contract the
-    // callers below use: -1 = skipped (unchanged), >0 = entities extracted, 0 = nothing/no model.
+    // callers below use: -2 = no model loaded (couldn't extract), -1 = skipped (unchanged),
+    // >0 = entities extracted, 0 = ran but found nothing. The -2 case lets the background queue flag
+    // the graph as stale so the user is told to build it, instead of the note silently never
+    // appearing in the graph (the "I made a note but the graph didn't update" bug).
     const indexGraph = async (docId: string, text: string): Promise<number> => {
       const gen: TextGenerator | null =
         loadedModel && provider.complete ? (p, o) => provider.complete(p, o) : null;
       const r = await ingestDocGraph(store, docId, text, gen);
-      return r.status === 'skipped' ? -1 : r.status === 'ingested' ? r.entityCount : 0;
+      return r.status === 'no_model'
+        ? -2
+        : r.status === 'skipped'
+          ? -1
+          : r.status === 'ingested'
+            ? r.entityCount
+            : 0;
     };
 
     pipe = {
@@ -524,6 +822,7 @@
       forgetNote: (docId) => store.deleteNote(docId),
       graphRag: (v, opts) => store.graphRagSearch(v, opts),
       indexGraph,
+      seedGraph: (docId, text, extraction) => seedDocGraph(store, docId, text, extraction),
       clearGraph: (docId) => store.clearDocGraph(docId),
       entityData: async () => ({
         entities: await store.allEntities(),
@@ -690,6 +989,7 @@
   async function drainIndexQueue() {
     if (indexRunning || !pipe) return;
     indexRunning = true;
+    let missedGraph = false; // a note whose entities couldn't be extracted (no model) → graph behind
     while (indexJobs.length) {
       const job = indexJobs[0];
       try {
@@ -701,7 +1001,7 @@
           bgProgress = total > EMBED_PROGRESS_MIN ? `${shortName(job.docId)} ${done}/${total}` : '';
         });
         // Extract + persist the note's entity graph too (best-effort; needs a loaded model).
-        await pipe.indexGraph(job.docId, job.body);
+        if ((await pipe.indexGraph(job.docId, job.body)) === -2) missedGraph = true;
       } catch {
         /* a failed index shouldn't wedge the queue; the note stays in the vault, just unindexed */
       }
@@ -711,6 +1011,15 @@
     }
     indexRunning = false;
     await refreshEntities(); // once, after the queue drains — never per-job (avoids the read/write race)
+    // If extraction ran (a model was loaded), the graph is current — clear any prior stale flag and
+    // refresh the open entity canvas so a new note's entities show without a manual rebuild. If it
+    // couldn't run (no model), flag the graph stale so the Entities pane prompts a build (FR-GRAPH-001).
+    if (missedGraph) {
+      graphStale = true;
+    } else {
+      graphStale = false;
+      if (rightView === 'graph' && selectedEntity) await openEntity(selectedEntity);
+    }
   }
 
   /** Rebuild the Entities pane from the persisted graph (after ingest / index / delete). Phase 2. */
@@ -847,12 +1156,14 @@
       let extracted = 0;
       let skipped = 0;
       for (const n of vault) {
+        if (n.docId === TOUR_DOC) continue; // the meta tour note never joins the graph (would bridge topics)
         status = `extracting entities: ${shortName(n.docId)}…`;
         const r = await pipe.indexGraph(n.docId, n.text).catch(() => 0);
         if (r === -1) skipped++;
         else if (r > 0) extracted++;
       }
       await refreshEntities();
+      graphStale = false; // the whole vault was just (re)extracted — nothing is behind anymore
       status =
         `graph ready · ${entityIndex.length} entities · ${extracted} extracted` +
         (skipped ? `, ${skipped} unchanged (skipped)` : '');
@@ -1493,6 +1804,12 @@
 
   async function ask() {
     if (!pipe || busy || !query.trim()) return;
+    const q = query.trim();
+    // Roll the just-finished turn into the transcript so the model keeps the thread on this
+    // follow-up (FR-CHAT-006), then free the composer so the follow-up can be typed.
+    if (answer.trim() && askedQuery.trim()) history = [...history, { query: askedQuery, answer }];
+    askedQuery = q;
+    query = '';
     busy = true;
     answer = '';
     cites = [];
@@ -1502,7 +1819,7 @@
     activeSpan = null;
     try {
       status = 'embedding query…';
-      const qv = await pipe.embed(query);
+      const qv = await pipe.embed(q);
       status = scope ? `retrieving (scoped: ${scopeLabel(scope)})…` : 'retrieving…';
       graphInfo = '';
       // Scoped retrieval (FR-RET-004): over-fetch then keep only in-scope hits so a question
@@ -1535,9 +1852,26 @@
         // Micro-Map, and the grounded context carry only genuinely relevant notes (FR-CHAT-002).
         relevant = relevantHits(filterByScope(await pipe.search(qv, scope ? 24 : 12), scopeIds));
       }
+      // Hybrid precision (FR-RET-003): re-rank the relevance-floor survivors by fusing their vector
+      // rank with an exact-term lexical rank, so a note that's merely TOPICALLY similar (e.g. another
+      // deal's invoice — dense with "budget/payment") but never NAMES the query's subject is demoted
+      // beneath the notes that actually mention it, and falls past the per-doc cap instead of
+      // polluting Sources + wasting a context slot. Pure cosine can't tell "Project Harmony's budget"
+      // from an unrelated invoice; proper-noun overlap can. No-op when the query shares no lexical
+      // term with any hit (recall preserved), and cosine scores are untouched (only the order shifts).
+      const reranked = hybridRerank(relevant, queryTerms(q));
+      // …then EXCLUDE cross-subject noise outright (not just demote it): anchor on the KNOWLEDGE GRAPH
+      // to the query's SUBJECT CLUSTER (notes mentioning a named entity + their co-occurring-entity
+      // siblings, 2 hops). Another deal's invoice that merely shares a topic word ("budget") — or got
+      // graph-expanded through a spurious shared node — names nothing in the cluster and is dropped
+      // before the model ever sees it (precision must not depend on the LLM ignoring noise). A strong
+      // standalone semantic match still survives; and it's a NO-OP when the query names no known
+      // entity (or the graph isn't built yet), so recall is preserved.
+      const anchorDocs = entityAnchorDocs(q, entityIndex);
+      const denoised = restrictToEntities(reranked, anchorDocs);
       // Favor BREADTH across distinct documents (FR-CHAT-002): one best chunk per doc. GraphRAG gets
       // more room (8 docs) so the graph-connected siblings actually surface alongside the seeds.
-      hits = dedupeByDoc(relevant, graphRagOn ? 8 : 5);
+      hits = dedupeByDoc(denoised, graphRagOn ? 8 : 5);
       graphExpandedIds = expandedIds;
       graphShared = new Map(
         expandedForLabels.map((h) => [
@@ -1549,7 +1883,7 @@
       graphInfo = graphAdded > 0 ? `+${graphAdded} graph-connected` : '';
       references = referencesFromHits(hits);
       // Micro-Map (FR-GRAPH-001) + persist the retrieval sub-graph edges (FR-GRAPH-002).
-      graph = buildMicroGraph(query, hits, { graphInfo: graphShared });
+      graph = buildMicroGraph(q, hits, { graphInfo: graphShared });
       try {
         await pipe.relate('current', hits);
       } catch {
@@ -1582,8 +1916,9 @@
         // Reason mode elaborates over full notes, so give it more room than the terse grounded answer.
         {
           requestId: 'q',
-          query,
+          query: q,
           context: genContext,
+          history,
           modelId,
           maxTokens: answerMode === 'reason' ? 512 : 256,
           answerMode
@@ -1610,6 +1945,19 @@
     } finally {
       busy = false;
     }
+  }
+
+  /** Start a fresh Ask conversation: drop the transcript + the current answer and its panels. */
+  function newConversation() {
+    history = [];
+    askedQuery = '';
+    answer = '';
+    cites = [];
+    references = [];
+    hits = [];
+    graph = null;
+    activeSpan = null;
+    status = '';
   }
 
   // Magic Jump (FR-CHAT-003): open the cited chunk's document and highlight its exact span.
@@ -1660,6 +2008,13 @@
 
   const activeNote = $derived(activeDoc ? vault.find((n) => n.docId === activeDoc) : undefined);
   const activeBacklinks = $derived(activeDoc ? (backlinks.get(activeDoc) ?? []) : []);
+  // Entities extracted FROM the open note — so opening a note answers "what entities does this note
+  // have?" directly, including a freshly-created note's entities that rank too low for the top-6
+  // sidebar pane. Reactive on entityIndex: chips appear on their own once background extraction lands.
+  const activeNoteEntities = $derived.by(() => {
+    const d = activeDoc;
+    return d ? entityIndex.filter((e) => e.docIds.includes(d)) : [];
+  });
   const activeUnlinked = $derived(
     activeNote
       ? findUnlinkedMentions(
@@ -2193,6 +2548,19 @@
               entity graph{/if}
           </button>
         {/if}
+        {#if graphStale && entityIndex.length}
+          <!-- New/edited notes were saved while no model was loaded, so their entities aren't in the
+               graph yet. Clicking loads a model and re-extracts so the graph catches up (FR-GRAPH-001). -->
+          <button
+            class="graph-stale nb-hov"
+            onclick={buildVaultGraph}
+            disabled={graphBusy}
+            title="New notes aren't in the graph yet — update to extract their entities"
+          >
+            {#if graphBusy}<span class="spinner"></span>updating…{:else}{@render ic('graph', 12)} Update
+              graph — new notes pending{/if}
+          </button>
+        {/if}
 
         {#if tagIndex.length}
           <div class="side-head mt"><span class="label">Tags</span></div>
@@ -2514,6 +2882,19 @@
                   {@html renderMarkdown(activeNote.text, { resolveLink: resolveNoteLink })}
                 </article>
               {/if}
+              {#if activeNoteEntities.length}
+                <div class="note-entities">
+                  <div class="label">Entities in this note · {activeNoteEntities.length}</div>
+                  <div class="ent-chips">
+                    {#each activeNoteEntities as e (e.id)}
+                      <button class="ent-chip nb-hov" onclick={() => openEntity(e)} title={e.type}>
+                        <span class="ent-dot" style="background:{entityColor(e.type)}"
+                        ></span>{e.name}</button
+                      >
+                    {/each}
+                  </div>
+                </div>
+              {/if}
               {#if activeBacklinks.length || activeUnlinked.length}
                 <div class="mentions">
                   {#if activeBacklinks.length}
@@ -2572,12 +2953,28 @@
           >scoped to <span class="mono">{scope ? scopeLabel(scope) : 'whole vault'}</span></span
         >
         <span class="spacer"></span>
+        {#if history.length || answer || hits.length}
+          <button
+            class="rail-new nb-hov"
+            onclick={newConversation}
+            disabled={busy}
+            title="Start a new conversation">{@render ic('plus', 13)} New</button
+          >
+        {/if}
         <kbd>⌘J</kbd>
       </div>
 
       <div class="rail-body">
+        {#if history.length}
+          <!-- Conversation transcript (FR-CHAT-006): prior turns above the live one. Past answers keep
+               their prose but drop [#n] buttons (their retrieved hits are no longer held). -->
+          {#each history as turn, i (i)}
+            <div class="ask-bubble past">{turn.query}</div>
+            <article class="prose answer past">{@html pastAnswerHtml(turn.answer)}</article>
+          {/each}
+        {/if}
         {#if busy || answer || hits.length}
-          {#if query}<div class="ask-bubble">{query}</div>{/if}
+          {#if askedQuery}<div class="ask-bubble">{askedQuery}</div>{/if}
           {#if busy && !answer}<div class="rail-loading">
               <span class="spinner"></span><span>{status}</span>
             </div>{/if}
@@ -3483,6 +3880,24 @@
     font-size: 12.5px;
     cursor: pointer;
   }
+  .graph-stale {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    margin-top: 6px;
+    padding: 7px 10px;
+    border-radius: var(--r-md);
+    border: 1px dashed var(--accent);
+    background: var(--accent-soft);
+    color: var(--accent-ink);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .graph-stale:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
   .tagwrap {
     display: flex;
     flex-wrap: wrap;
@@ -3812,6 +4227,27 @@
     padding-top: 16px;
     border-top: 1px solid var(--line);
   }
+  .note-entities {
+    margin-top: 22px;
+  }
+  .ent-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+  }
+  .ent-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background: var(--surface-alt);
+    color: var(--ink-2);
+    font-size: 12.5px;
+    cursor: pointer;
+  }
   .mention {
     display: flex;
     gap: 12px;
@@ -4035,6 +4471,33 @@
     line-height: 1.5;
     padding: 9px 12px;
     border-radius: 10px 10px 4px 10px;
+  }
+  /* Prior turns in the transcript read as quieter than the live one. */
+  .ask-bubble.past {
+    opacity: 0.78;
+    margin-bottom: 10px;
+  }
+  .prose.answer.past {
+    color: var(--ink-2);
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 14px;
+  }
+  .rail-new {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 9px;
+    border-radius: var(--r-sm);
+    border: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--ink-2);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .rail-new:disabled {
+    opacity: 0.5;
+    cursor: default;
   }
   .rail-loading {
     display: flex;

@@ -7,6 +7,8 @@ import * as webllm from '@mlc-ai/web-llm';
 import type { InferenceProvider, GenerateRequest, GenerateResult, Backend } from './provider';
 import {
   assemblePrompt,
+  buildChatMessages,
+  normalizeCitationMarkers,
   parseCitations,
   stripPromptEcho,
   NO_RESULTS_MESSAGE
@@ -94,10 +96,8 @@ export class WebLLMProvider implements InferenceProvider {
       // Low temperature → grounded, reproducible answers (RAG should not be creative).
       temperature: 0.2,
       top_p: 0.9,
-      messages: [
-        { role: 'system', content: prompt.system },
-        { role: 'user', content: prompt.user }
-      ]
+      // Replay prior turns before this turn's grounded message so a follow-up keeps the thread.
+      messages: buildChatMessages(prompt.system, prompt.user, req.history)
     });
 
     for await (const part of stream) {
@@ -117,7 +117,7 @@ export class WebLLMProvider implements InferenceProvider {
     const seconds = Math.max((performance.now() - start) / 1000, 1e-3);
     // Defensive: strip any echoed prompt scaffolding the small model emitted, then parse
     // citations against the CLEANED text so spans line up with what the user sees.
-    const cleaned = stripPromptEcho(text);
+    const cleaned = normalizeCitationMarkers(stripPromptEcho(text));
     const { citations } = parseCitations(cleaned, prompt.contextOrder);
     return {
       requestId: req.requestId,

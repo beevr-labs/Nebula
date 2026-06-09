@@ -11,8 +11,8 @@
 // reached through the injected `TextGenerator` seam (entities.ts), the one part that needs the model.
 
 import type { TextGenerator } from '$lib/ingest/autotag';
-import { extractEntities, type ExtractOptions } from '$lib/graph/entities';
-import { resolveExtraction } from '$lib/graph/resolve';
+import { extractEntities, type ExtractOptions, type Extraction } from '$lib/graph/entities';
+import { resolveExtraction, type ResolvedGraph } from '$lib/graph/resolve';
 import type { EntityRecord } from '$lib/graph/types';
 
 /** Relations weaker than this confidence are dropped — keeps low-signal/guessed edges out (a tiny
@@ -76,11 +76,27 @@ export async function ingestDocGraph(
   const g = resolveExtraction(res.extraction);
   if (g.entities.length === 0) return { status: 'no_graph' };
 
+  const entityCount = await persistResolvedGraph(store, docId, text, g);
+  return { status: 'ingested', entityCount };
+}
+
+/**
+ * Persist an already-RESOLVED graph for one note (the steps shared by LLM extraction and pre-built
+ * seeding): replace the doc's prior graph, upsert entity nodes, attach each entity to the chunks
+ * whose text actually NAMES it (chunk-level provenance — what lets GraphRAG pull the right sibling
+ * chunks), add the above-floor relation edges, and record the content hash so the incremental guard
+ * skips this note next time. Returns the entity count. Chunks must already exist (index the note
+ * first), else no mentions attach.
+ */
+async function persistResolvedGraph(
+  store: GraphIngestStore,
+  docId: string,
+  text: string,
+  g: ResolvedGraph
+): Promise<number> {
   await store.clearDocGraph(docId);
   for (const e of g.entities) await store.upsertEntity(e);
 
-  // Attach each entity to the chunks whose text actually names it → chunk-level provenance, which is
-  // what lets GraphRAG pull the RIGHT sibling chunks (not the whole doc) on a shared entity.
   const chunks = await store.chunkTextsForDoc(docId);
   const lc = chunks.map((c) => ({ chunkId: c.chunkId, text: c.text.toLowerCase() }));
   for (const e of g.entities) {
@@ -96,6 +112,22 @@ export async function ingestDocGraph(
     await store.relateEntities(r.sourceId, r.targetId, r.type, docId);
   }
 
-  await store.setGraphHash(docId, hash);
-  return { status: 'ingested', entityCount: g.entities.length };
+  await store.setGraphHash(docId, graphHash(text));
+  return g.entities.length;
+}
+
+/**
+ * Seed a note's graph from a HAND-AUTHORED extraction — the exact same resolve + persist path as
+ * `ingestDocGraph`, but with NO LLM. This is what lets a demo/seed vault ship a ready-made knowledge
+ * graph so a first-run user sees entities + relations instantly, without waiting to load the chat
+ * model and run extraction. Records the content hash too, so the later auto-build SKIPS these notes
+ * (they're already graphed) unless the user edits them. Index the note first so chunks exist.
+ */
+export async function seedDocGraph(
+  store: GraphIngestStore,
+  docId: string,
+  text: string,
+  extraction: Extraction
+): Promise<number> {
+  return persistResolvedGraph(store, docId, text, resolveExtraction(extraction));
 }

@@ -35,6 +35,26 @@ describe('resolveExtraction', () => {
     expect(g.entities[0].aliases.sort()).toEqual(['ACME', 'Acme', 'acme']);
   });
 
+  it('drops pronoun / generic-referent "entities" and any relation touching them (graph-bridge noise)', () => {
+    const ext: Extraction = {
+      entities: [
+        { name: 'I', type: 'person' }, // pronoun the model wrongly emitted
+        { name: 'we', type: 'org' },
+        { name: 'Akira Tanaka', type: 'person' },
+        { name: 'Project Harmony', type: 'project' }
+      ],
+      relations: [
+        { source: 'I', target: 'Project Harmony', type: 'mentions' }, // junk endpoint → dropped
+        { source: 'Akira Tanaka', target: 'Project Harmony', type: 'champions' }
+      ]
+    };
+    const g = resolveExtraction(ext);
+    expect(g.entities.map((e) => e.id).sort()).toEqual(['akira_tanaka', 'project_harmony']);
+    expect(g.relations).toEqual([
+      { sourceId: 'akira_tanaka', targetId: 'project_harmony', type: 'champions' }
+    ]);
+  });
+
   it('rewrites relation endpoints to canonical ids', () => {
     const ext: Extraction = {
       entities: [

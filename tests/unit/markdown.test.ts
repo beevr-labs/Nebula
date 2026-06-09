@@ -110,4 +110,29 @@ describe('linkifyCitations', () => {
   it('leaves text without markers untouched', () => {
     expect(linkifyCitations('no citations here')).toBe('no citations here');
   });
+
+  it('strips markers outside the valid set (hallucinated / out-of-range citations)', () => {
+    const valid = new Set([1, 2]);
+    const out = linkifyCitations('Real [#1] but invented [#5] and another [#2].', valid);
+    expect(out).toContain('data-cite="1"');
+    expect(out).toContain('data-cite="2"');
+    expect(out).not.toContain('data-cite="5"');
+    expect(out).not.toContain('[#5]'); // the dead marker is gone entirely, not left as text
+  });
+
+  it('swallows the space before a stripped marker so no double space / pre-punctuation gap remains', () => {
+    expect(linkifyCitations('the young Sun [#5].', new Set([1]))).toBe('the young Sun.');
+  });
+
+  it('with an empty valid set, strips every marker (ungrounded answer cites nothing)', () => {
+    expect(linkifyCitations('Earth formed from a nebula [#1][#2].', new Set())).toBe(
+      'Earth formed from a nebula.'
+    );
+  });
+
+  it('keeps wrapping every marker when no valid set is given (raw behavior)', () => {
+    const out = linkifyCitations('a [#1] b [#9]');
+    expect(out).toContain('data-cite="1"');
+    expect(out).toContain('data-cite="9"');
+  });
 });

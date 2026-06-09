@@ -465,8 +465,17 @@ export class VectorStore {
     const k = opts.k ?? 8;
 
     const seeds = await this.search(queryVec, seedK);
-    const seedChunkIds = new Set(seeds.map((h) => h.chunkId));
-    const entityIds = await this.entityIdsForChunks([...seedChunkIds]);
+    const seedChunkIds = new Set(seeds.map((h) => h.chunkId)); // all seeds are excluded from expansion
+    // Anchor the graph expansion on the STRONGLY-relevant seeds only (a tight band below the top
+    // score). Using EVERY vector seed's entities — including the weak tail a vault always returns —
+    // floods the expansion with off-topic siblings: e.g. a "trip budget" question, which names no
+    // entity, otherwise pulls in research notes through a weak research seed's entities. The band
+    // keeps the on-topic seeds (so legitimate graph siblings still surface) and drops the noise.
+    const top = seeds[0]?.score ?? 0;
+    const anchorSeeds = seeds.filter((h) => h.score >= top * 0.8);
+    const entityIds = await this.entityIdsForChunks(
+      (anchorSeeds.length ? anchorSeeds : seeds).map((h) => h.chunkId)
+    );
     if (entityIds.length === 0) {
       return { seeds, expanded: [], fused: seeds.slice(0, k), entityIds: [] };
     }

@@ -93,7 +93,8 @@ export function rrfFuse(rankings: string[][], k = 60): Map<string, number> {
   return scores;
 }
 
-/** Lightweight lexical (BM25-stand-in) score: count case-insensitive exact term hits. */
+/** Lightweight lexical (BM25-stand-in) score: count case-insensitive exact SUBSTRING term hits. Kept
+ *  for `hybridSearch`, whose terms are exact IDs/names/symbols where substring matching is wanted. */
 function lexicalScore(text: string, terms: string[]): number {
   const hay = text.toLowerCase();
   let score = 0;
@@ -108,6 +109,24 @@ function lexicalScore(text: string, terms: string[]): number {
       idx = hay.indexOf(t, from);
     }
   }
+  return score;
+}
+
+/**
+ * WHOLE-WORD term overlap (count of query terms present as full words in `text`). Unlike the
+ * substring `lexicalScore`, this won't let a weak query term like "end" (from "quarter-end") match
+ * inside "spend" / "send" — critical for the precision re-rank + noise gate over natural-language
+ * notes, where a false substring hit would wrongly rescue a cross-deal note. Unicode word split.
+ */
+function wordTermScore(text: string, terms: string[]): number {
+  const words = new Set(
+    text
+      .toLowerCase()
+      .split(/[^\p{L}\p{N}]+/u)
+      .filter(Boolean)
+  );
+  let score = 0;
+  for (const t of terms) if (words.has(t)) score += 1;
   return score;
 }
 
@@ -143,6 +162,187 @@ export function hybridSearch(
     .sort(byScoreThenId)
     .slice(0, k)
     .map(({ id, score }) => toHit(byId.get(id) as IndexedChunk, score));
+}
+
+// Short, high-frequency English words that carry no retrieval signal — dropped from query terms so
+// the lexical re-rank keys on the distinctive content words (esp. proper nouns) that actually
+// separate the right note from a topically-similar one. (Tokens < 3 chars are dropped too, which
+// already removes "is/of/to/an/or/we/it", so this only needs the ≥3-char stop words.)
+const STOP_WORDS = new Set([
+  'the',
+  'and',
+  'for',
+  'are',
+  'was',
+  'were',
+  'our',
+  'you',
+  'your',
+  'this',
+  'that',
+  'these',
+  'those',
+  'with',
+  'what',
+  'who',
+  'whom',
+  'whose',
+  'which',
+  'how',
+  'why',
+  'when',
+  'where',
+  'does',
+  'did',
+  'can',
+  'could',
+  'will',
+  'would',
+  'should',
+  'has',
+  'have',
+  'had',
+  'not',
+  'but',
+  'its',
+  'his',
+  'her',
+  'from',
+  'into',
+  'about',
+  'they',
+  'them',
+  'their',
+  'than',
+  'then',
+  'out',
+  'get',
+  'any',
+  'all'
+]);
+
+/**
+ * Tokenize a query into distinctive lexical terms for the hybrid re-rank: lowercased, deduped,
+ * ≥3 chars, stop-words removed. Unicode-aware split (keeps Vietnamese / accented content words).
+ */
+export function queryTerms(query: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const tok of query.toLowerCase().split(/[^\p{L}\p{N}]+/u)) {
+    if (tok.length < 3 || STOP_WORDS.has(tok) || seen.has(tok)) continue;
+    seen.add(tok);
+    out.push(tok);
+  }
+  return out;
+}
+
+/**
+ * Precision re-rank (FR-RET-003): re-order already-retrieved hits by fusing their VECTOR rank with
+ * an exact-term LEXICAL rank (RRF). A note that is merely TOPICALLY similar to the query but never
+ * names its subject (the classic dense-retrieval false positive — e.g. an unrelated invoice scoring
+ * high on a "budget" question) gets only its vector contribution and is demoted beneath notes that
+ * actually contain the query's distinctive terms; the per-doc cap downstream then drops it. Pure +
+ * order-only: each hit keeps its cosine `score` (the relevance floor + Sources display rely on it),
+ * and the call is a NO-OP when the query shares no lexical term with any hit (recall preserved).
+ */
+export function hybridRerank<T extends { chunkId: string; text: string; score: number }>(
+  hits: T[],
+  terms: string[],
+  rrfK = 60
+): T[] {
+  if (hits.length <= 1 || terms.length === 0) return hits;
+  const vectorRanking = hits.map((h) => h.chunkId); // hits arrive sorted desc by cosine
+  const lexicalRanking = hits
+    .map((h) => ({ id: h.chunkId, score: wordTermScore(h.text, terms) }))
+    .filter((x) => x.score > 0)
+    .sort(byScoreThenId)
+    .map((x) => x.id);
+  if (lexicalRanking.length === 0) return hits; // no lexical signal at all → leave order untouched
+  const fused = rrfFuse([vectorRanking, lexicalRanking], rrfK);
+  const cosine = new Map(hits.map((h) => [h.chunkId, h.score]));
+  return [...hits].sort((a, b) => {
+    const fa = fused.get(a.chunkId) ?? 0;
+    const fb = fused.get(b.chunkId) ?? 0;
+    return (
+      fb - fa ||
+      (cosine.get(b.chunkId) ?? 0) - (cosine.get(a.chunkId) ?? 0) ||
+      (a.chunkId < b.chunkId ? -1 : a.chunkId > b.chunkId ? 1 : 0)
+    );
+  });
+}
+
+/**
+ * The documents the query ANCHORS to via the knowledge graph — its SUBJECT CLUSTER. Two hops:
+ *   1. Seed: notes that mention an entity the query names (full name in the query, or a distinctive
+ *      ≥4-char word of the name appears as a query term) — e.g. the notes mentioning "Project Harmony".
+ *   2. Expand: notes that mention any entity CO-OCCURRING in a seed note — e.g. a "Project Harmony"
+ *      seed also names "Yamaha", so the POC note (which names Yamaha but not "Project Harmony") joins
+ *      the cluster. This is the graph-native inclusion GraphRAG is for, computed from entity mentions.
+ *
+ * This is a far stronger relevance signal than raw lexical/topic overlap — it keys on the subject,
+ * not generic words ("budget", "end") a cross-deal invoice happens to share — and, being mention-
+ * based, it deliberately EXCLUDES a note that only got graph-expanded through a spurious shared
+ * entity (an invoice linked in via a junk node), because that note names nothing in the cluster.
+ * Empty when the query names no known entity (caller treats it as "no anchor" → keeps all; recall-safe).
+ */
+export function entityAnchorDocs(
+  query: string,
+  entities: { name: string; docIds: string[] }[]
+): Set<string> {
+  const qlc = query.toLowerCase();
+  const qWords = new Set(queryTerms(query));
+  // A name-word only anchors if it's DISTINCTIVE — present in exactly one entity's name. This stops a
+  // generic shared token like "project" (in "Project Harmony", "Project Falcon", "Project Orion")
+  // from cross-anchoring every deal; "harmony"/"falcon" (unique to one) still anchor precisely.
+  const nameWordFreq = new Map<string, number>();
+  for (const e of entities) {
+    for (const w of new Set(
+      e.name
+        .toLowerCase()
+        .split(/[^\p{L}\p{N}]+/u)
+        .filter((x) => x.length >= 4)
+    )) {
+      nameWordFreq.set(w, (nameWordFreq.get(w) ?? 0) + 1);
+    }
+  }
+  const seedDocs = new Set<string>();
+  for (const e of entities) {
+    const nameLc = e.name.toLowerCase();
+    if (nameLc.length < 3) continue;
+    const named =
+      qlc.includes(nameLc) ||
+      nameLc
+        .split(/[^\p{L}\p{N}]+/u)
+        .some((w) => w.length >= 4 && nameWordFreq.get(w) === 1 && qWords.has(w));
+    if (named) for (const d of e.docIds) seedDocs.add(d);
+  }
+  if (seedDocs.size === 0) return seedDocs; // query named no known entity → no anchor
+  // Hop 2: any entity that co-occurs in a seed note pulls in the rest of its notes (subject cluster).
+  const docs = new Set(seedDocs);
+  for (const e of entities) {
+    if (e.docIds.some((d) => seedDocs.has(d))) for (const d of e.docIds) docs.add(d);
+  }
+  return docs;
+}
+
+/**
+ * Restrict hits to the query's entity-anchored documents (FR-CHAT-002 precision) — a hit on a note
+ * that mentions NONE of the entities the query named, isn't `protect`-ed (graph-connected siblings
+ * keep their structural inclusion), and isn't a strong standalone semantic match (cosine ≥
+ * `strongCosine`) is a different subject (the cross-deal invoice / another client's deal) and is
+ * dropped, so even a weak model never SEES it — precision must not depend on the LLM ignoring noise.
+ * Recall-safe: a NO-OP when the query anchored to no entity (`anchorDocs` empty), and any genuinely
+ * strong semantic match survives regardless. Order preserved.
+ */
+export function restrictToEntities<T extends { chunkId: string; docId: string; score: number }>(
+  hits: T[],
+  anchorDocs: ReadonlySet<string>,
+  opts: { protect?: ReadonlySet<string>; strongCosine?: number } = {}
+): T[] {
+  if (anchorDocs.size === 0) return hits; // query named no known entity → keep all (recall-safe)
+  const protect = opts.protect ?? new Set<string>();
+  const strong = opts.strongCosine ?? 0.6;
+  return hits.filter((h) => anchorDocs.has(h.docId) || protect.has(h.chunkId) || h.score >= strong);
 }
 
 /**

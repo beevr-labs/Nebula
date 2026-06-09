@@ -44,6 +44,60 @@ export function canonicalId(name: string): string {
     .replace(/[^\p{L}\p{N}_-]/gu, '');
 }
 
+// Pronouns + generic referents a small extraction model sometimes emits as "entities" ("I", "we",
+// "they", "this"). They are NOT real entities, and worse: because they recur across unrelated notes,
+// they become spurious GRAPH BRIDGES — an invoice and a sales deal both "mentioning" the entity "I"
+// get graph-connected, so GraphRAG drags one into the other's answer. Dropping them at resolution
+// keeps the graph's edges meaningful. Matched on the canonical (lowercased) form.
+const JUNK_ENTITY_NAMES = new Set([
+  'i',
+  'we',
+  'you',
+  'he',
+  'she',
+  'it',
+  'they',
+  'me',
+  'us',
+  'him',
+  'her',
+  'them',
+  'our',
+  'my',
+  'your',
+  'his',
+  'its',
+  'their',
+  'this',
+  'that',
+  'these',
+  'those',
+  'here',
+  'there',
+  'who',
+  'what',
+  'which',
+  'someone',
+  'something',
+  'anyone',
+  'anything',
+  'everyone',
+  'everything',
+  'nobody',
+  'nothing',
+  'myself',
+  'itself',
+  'themselves',
+  'ourselves'
+]);
+
+/** A name that should never become a graph node: a pronoun / generic referent that would otherwise
+ *  bridge unrelated notes through a meaningless shared "entity". (Single letters are left alone — a
+ *  real product/project can legitimately be one char, e.g. "Q"; the pronoun set covers "I".) */
+function isJunkEntityName(canonical: string): boolean {
+  return JUNK_ENTITY_NAMES.has(canonical);
+}
+
 /** Pick the better display name for the same entity: prefer the one with more original casing. */
 function preferName(a: string, b: string): string {
   const upperCount = (s: string): number => (s.match(/\p{Lu}/gu) ?? []).length;
@@ -63,7 +117,7 @@ export function resolveExtraction(ext: Extraction): ResolvedGraph {
 
   for (const e of ext.entities) {
     const id = canonicalId(e.name);
-    if (!id) continue;
+    if (!id || isJunkEntityName(id)) continue; // skip pronouns / generic referents (graph-bridge noise)
     const existing = byId.get(id);
     if (!existing) {
       byId.set(id, { id, name: e.name, type: e.type, aliases: [e.name] });

@@ -100,7 +100,9 @@ export function assemblePrompt(
     directive = `Using only these notes, answer this question in plain language and cite the chunk numbers you used`;
   }
   // Omit the empty "Notes:" scaffold when there is no context, so the model isn't told to read notes that aren't there.
-  const user = hasContext ? `Notes:\n${blocks}\n\n${directive}: ${query}` : `${directive}: ${query}`;
+  const user = hasContext
+    ? `Notes:\n${blocks}\n\n${directive}: ${query}`
+    : `${directive}: ${query}`;
   const system = mode === 'reason' ? SYSTEM_PROMPT_REASON : SYSTEM_PROMPT;
 
   return { kind: 'grounded', system, user, contextOrder };
@@ -121,6 +123,50 @@ export function stripPromptEcho(text: string): string {
   // Drop a leading echoed "Question:" / "# Question …" / "Notes:" / "# Context …" line.
   t = t.replace(/^\s*(?:#+\s*)?(?:question|notes|context)\b[^\n]*\n?/gi, '');
   return t.trim();
+}
+
+/** One completed Q→A exchange, replayed into the prompt so a follow-up keeps the thread (FR-CHAT-006). */
+export interface ChatTurn {
+  query: string;
+  answer: string;
+}
+
+export interface ChatMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+}
+
+/**
+ * Build the model's message list for one turn: system prompt, then the prior turns replayed as
+ * user/assistant pairs, then THIS turn's grounded user message (which already carries the retrieved
+ * Notes + directive + question). Prior turns are replayed verbatim (no re-injected context) — the
+ * running thread is what gives a follow-up like "and the second one?" its referent, while the
+ * current turn's freshly-retrieved context grounds the new answer. Pure/deterministic.
+ */
+export function buildChatMessages(
+  system: string,
+  user: string,
+  history: ChatTurn[] = []
+): ChatMessage[] {
+  return [
+    { role: 'system', content: system },
+    ...history.flatMap((t): ChatMessage[] => [
+      { role: 'user', content: t.query },
+      { role: 'assistant', content: t.answer }
+    ]),
+    { role: 'user', content: user }
+  ];
+}
+
+/**
+ * Normalize near-miss citation markers a small model emits — `[:#3]`, `[ #3]`, `[ref #3]`, `[#3 ]` —
+ * to the canonical `[#3]` so they parse + render as real, clickable citations instead of leaking into
+ * the answer as broken text (observed live: a 7B model wrote `[:#5]`). Only rewrites brackets that
+ * ALREADY contain `#<digits>`, so a bare `[3]` (ambiguous with footnotes / list markers / array
+ * indices in note text) is deliberately left alone. Idempotent — canonical markers pass through.
+ */
+export function normalizeCitationMarkers(text: string): string {
+  return text.replace(/\[[^\]\d#]*#\s*(\d+)\s*\]/g, '[#$1]');
 }
 
 export interface ParsedCitation {
