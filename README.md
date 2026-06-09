@@ -108,6 +108,10 @@ npm run test:int                  # real PDF + database, offline
 npm run test:models               # real search models (downloads ~570 MB first run)
 ```
 
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE). Free to use, modify, and distribute, with an explicit patent grant; just keep the notice. The AI models you download at runtime carry their own licenses (e.g. Qwen and bge-m3 are Apache-2.0; Llama uses the Llama Community License).
+
 ---
 
 **[▶ Try Nebula now →](https://thienzz.github.io/Nebula/)** — your notes, finally answering back.

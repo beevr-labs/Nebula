@@ -1,0 +1,27 @@
+Nebula
+Copyright 2026 Thien Nguyen
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+It bundles or builds upon the following third-party open-source software,
+each distributed under its own license (full texts ship with each package
+under node_modules/):
+
+Apache License 2.0
+  - SurrealDB — @surrealdb/wasm, surrealdb
+    Copyright (c) SurrealDB Ltd
+  - WebLLM — @mlc-ai/web-llm
+    Copyright (c) MLC AI and WebLLM contributors
+  - Transformers.js — @huggingface/transformers
+    Copyright (c) Hugging Face, Inc. and contributors
+  - PDF.js — pdfjs-dist
+    Copyright (c) Mozilla Foundation and contributors
+
+MIT License
+  - Svelte / SvelteKit and their tooling
+    Copyright (c) Svelte contributors
+
+AI models are NOT bundled: they are downloaded at runtime, on demand, into
+the user's own browser, and each carries its own license (for example, Qwen
+and bge-m3 are Apache-2.0; Meta's Llama models use the Llama Community
+License). Nebula does not redistribute any model weights.

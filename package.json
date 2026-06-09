@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "description": "Nebula — local-first knowledge graph & context engine (Windows-first MVP).",
-  "license": "TBD",
+  "license": "Apache-2.0",
+  "author": "Thien Nguyen <thien@beevr.ai>",
   "scripts": {
     "dev": "vite dev",
     "build": "vite build",
