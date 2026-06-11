@@ -3,8 +3,8 @@ import { chunk } from '../../src/lib/ingest/chunker';
 import { embed, embedBatch, makeBgeTokenCounter } from '../../src/lib/embed/embedder';
 import { vectorSearch, type IndexedChunk } from '../../src/lib/retrieval/search';
 
-// REAL end-to-end semantic search on CPU: text → chunk (real bge-m3 tokenizer) →
-// embed (real 1024-dim) → cosine retrieval. Proves FR-ING-003/004 + FR-RET-001 +
+// REAL end-to-end semantic search on CPU: text → chunk (real embed-model tokenizer) →
+// embed (real EMBEDDING_DIM vectors) → cosine retrieval. Proves FR-ING-003/004 + FR-RET-001 +
 // the degraded-tier semantic promise (FR-CAP-002) without any GPU.
 
 const doc = [

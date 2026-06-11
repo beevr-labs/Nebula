@@ -36,6 +36,25 @@ export function approxTokenCount(text: string): number {
   return t.length === 0 ? 0 : t.split(/\s+/).length;
 }
 
+/** Ultra-conservative upper bound on bge tokens per whitespace word (real prose ≈1.3; Vietnamese,
+ *  split per syllable, ≈1.5–2; code can spike). Used to decide when whitespace sizing is safe. */
+export const MAX_BGE_TOKENS_PER_WORD = 6;
+
+/**
+ * Whether the cheap whitespace counter is truncation-SAFE for chunk sizing at this target `size`.
+ * Sizing precision only matters near the embed window (R-1, ADR-006): if a `size`-word chunk can't
+ * reach the window even at the worst-case tokens-per-word, the bge tokenizer is unnecessary, and the
+ * Worker can skip loading it + the hundreds of per-segment WASM encode() calls a long note triggers
+ * (a big share of long-note indexing time). At the production size (60) this is true by a wide margin
+ * (60×6 = 360 ≪ 8192); it only flips to the precise counter for chunks that could near the window.
+ */
+export function approxSizingIsSafe(
+  size: number,
+  maxTokens: number = EMBEDDING_MAX_TOKENS
+): boolean {
+  return size * MAX_BGE_TOKENS_PER_WORD < maxTokens;
+}
+
 /**
  * Startup invariant (FR-ING-003 / ADR-006): targetSize MUST stay strictly below
  * the embedding model's context window, or the embedder truncates silently.

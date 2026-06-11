@@ -7,6 +7,8 @@ import {
   hybridRerank,
   entityAnchorDocs,
   restrictToEntities,
+  withLexicalChannel,
+  wordTermScore,
   type IndexedChunk
 } from '../../src/lib/retrieval/search';
 
@@ -176,5 +178,52 @@ describe('vectorSearch — no-results relevance floor (FR-CHAT-002)', () => {
   });
   it('returns the hit when above the floor', () => {
     expect(vectorSearch([0, 1], index, { floor: 0.5 }).length).toBe(1);
+  });
+});
+
+describe('wordTermScore — whole-word only (no substring false hits)', () => {
+  it('counts query terms present as full words', () => {
+    expect(wordTermScore('Project Harmony budget review', ['harmony', 'budget'])).toBe(2);
+  });
+  it('does not match inside other words ("end" must not hit "spend")', () => {
+    expect(wordTermScore('we spend money', ['end'])).toBe(0);
+  });
+  it('is unicode-aware (Vietnamese syllables match as words)', () => {
+    expect(wordTermScore('ngân sách chuyến đi', ['ngân', 'sách'])).toBe(2);
+  });
+});
+
+describe('withLexicalChannel (exact-term recall top-up + rescue)', () => {
+  const ctx = [
+    { chunkId: 'a#0', docId: 'a.md' },
+    { chunkId: 'b#0', docId: 'b.md' }
+  ];
+  const lex = [
+    { chunkId: 'b#0', docId: 'b.md' }, // already in context → must not duplicate
+    { chunkId: 'c#0', docId: 'c.md' },
+    { chunkId: 'd#0', docId: 'd.md' },
+    { chunkId: 'e#0', docId: 'e.md' },
+    { chunkId: 'f#0', docId: 'f.md' },
+    { chunkId: 'g#0', docId: 'g.md' }
+  ];
+
+  it('appends lexical hits not already present, after the existing context', () => {
+    const out = withLexicalChannel(ctx, lex.slice(0, 2));
+    expect(out.map((h) => h.chunkId)).toEqual(['a#0', 'b#0', 'c#0']);
+  });
+
+  it('caps the top-up so a generic term cannot flood the context', () => {
+    const out = withLexicalChannel(ctx, lex, { maxAdd: 2 });
+    expect(out.map((h) => h.chunkId)).toEqual(['a#0', 'b#0', 'c#0', 'd#0']);
+  });
+
+  it('RESCUES an empty context: lexical hits become the context (exact-ID case)', () => {
+    const out = withLexicalChannel([], lex.slice(1, 3));
+    expect(out.map((h) => h.chunkId)).toEqual(['c#0', 'd#0']);
+  });
+
+  it('is a no-op with no lexical hits (recall never regresses)', () => {
+    expect(withLexicalChannel(ctx, [])).toBe(ctx);
+    expect(withLexicalChannel([], [])).toEqual([]);
   });
 });

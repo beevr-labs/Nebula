@@ -117,8 +117,10 @@ function lexicalScore(text: string, terms: string[]): number {
  * substring `lexicalScore`, this won't let a weak query term like "end" (from "quarter-end") match
  * inside "spend" / "send" — critical for the precision re-rank + noise gate over natural-language
  * notes, where a false substring hit would wrongly rescue a cross-deal note. Unicode word split.
+ * Exported for the DB-side lexical recall channel (VectorStore.lexicalSearch), which over-fetches
+ * with substring CONTAINS in-DB and then applies THIS whole-word filter to drop the false hits.
  */
-function wordTermScore(text: string, terms: string[]): number {
+export function wordTermScore(text: string, terms: string[]): number {
   const words = new Set(
     text
       .toLowerCase()
@@ -269,6 +271,29 @@ export function hybridRerank<T extends { chunkId: string; text: string; score: n
       (a.chunkId < b.chunkId ? -1 : a.chunkId > b.chunkId ? 1 : 0)
     );
   });
+}
+
+/**
+ * Merge the exact-term LEXICAL recall channel into an already-selected context (the recall half of
+ * FR-RET-003). `hybridRerank` can only re-order what the vector pass RETURNED — a chunk that names
+ * the query's exact term (an ID, a person, a project) but sits outside the HNSW top-K can never
+ * surface through re-ranking alone. This appends those independently-retrieved lexical hits:
+ *   • context non-empty → append up to `maxAdd` lexical hits not already present (recall top-up;
+ *     the cap keeps a generic term from flooding the context — precision gates run downstream).
+ *   • context EMPTY (no vector seed cleared the relevance floor) → the lexical hits BECOME the
+ *     context (the "exact ID" rescue: embeddings are weakest exactly where literal match is total).
+ * Pure + order-preserving; a no-op with no lexical hits, so recall never regresses.
+ */
+export function withLexicalChannel<T extends { chunkId: string }>(
+  context: T[],
+  lexical: T[],
+  opts: { maxAdd?: number } = {}
+): T[] {
+  const maxAdd = opts.maxAdd ?? 4;
+  const have = new Set(context.map((h) => h.chunkId));
+  const fresh = lexical.filter((h) => !have.has(h.chunkId)).slice(0, maxAdd);
+  if (fresh.length === 0) return context;
+  return context.length === 0 ? fresh : [...context, ...fresh];
 }
 
 /**

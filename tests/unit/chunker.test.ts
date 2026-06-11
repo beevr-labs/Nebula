@@ -1,8 +1,32 @@
 import { describe, it, expect } from 'vitest';
-import { chunk, assertChunkWindow, approxTokenCount } from '../../src/lib/ingest/chunker';
+import {
+  chunk,
+  assertChunkWindow,
+  approxTokenCount,
+  approxSizingIsSafe,
+  MAX_BGE_TOKENS_PER_WORD
+} from '../../src/lib/ingest/chunker';
 import { EMBEDDING_MAX_TOKENS } from '../../src/lib/inference/provider';
 
 // FR-ING-002/003 · ALGORITHMS §1. Sized with the injected/default token counter.
+
+describe('approxSizingIsSafe — when whitespace sizing can skip the bge tokenizer (R-1 safety)', () => {
+  it('is safe for the production chunk size (60 ≪ window)', () => {
+    expect(approxSizingIsSafe(60)).toBe(true);
+  });
+  it('uses a conservative tokens-per-word factor against the real window', () => {
+    // safe iff size × factor < window
+    const justSafe = Math.floor(EMBEDDING_MAX_TOKENS / MAX_BGE_TOKENS_PER_WORD) - 1;
+    const tooBig = Math.ceil(EMBEDDING_MAX_TOKENS / MAX_BGE_TOKENS_PER_WORD) + 1;
+    expect(approxSizingIsSafe(justSafe)).toBe(true);
+    expect(approxSizingIsSafe(tooBig)).toBe(false);
+  });
+  it('falls back to the precise counter for large chunks that could near the window', () => {
+    expect(approxSizingIsSafe(EMBEDDING_MAX_TOKENS)).toBe(false); // a chunk as big as the window
+    expect(approxSizingIsSafe(2000, 8192)).toBe(false); // 2000×6 = 12000 > 8192
+    expect(approxSizingIsSafe(500, 8192)).toBe(true); // 500×6 = 3000 < 8192
+  });
+});
 
 describe('assertChunkWindow — FR-ING-003 / ADR-006 invariant', () => {
   it('accepts the default 500 (< 512 window)', () => {

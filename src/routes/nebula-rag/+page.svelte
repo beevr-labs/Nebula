@@ -50,7 +50,7 @@
 
       const store = new VectorStore();
       try {
-        await store.connect('indxdb://nebula-rag-demo-m3', EMBEDDING_DIM);
+        await store.connect('indxdb://nebula-rag-demo-minilm', EMBEDDING_DIM);
         state.engine = 'indxdb'; // persistent webview store (GATE D)
       } catch {
         await store.connect('mem://', EMBEDDING_DIM);

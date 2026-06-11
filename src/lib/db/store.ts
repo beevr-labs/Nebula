@@ -10,6 +10,7 @@ import type { SearchHit } from '$lib/inference/provider';
 import type { EntityRecord, MentionEdge, RelationEdge } from '$lib/graph/types';
 import type { GraphNeighbor } from '$lib/graph/entity-graph';
 import { fuseGraphRag } from '$lib/retrieval/graphrag';
+import { wordTermScore } from '$lib/retrieval/search';
 
 export interface ChunkRecord {
   chunkId: string;
@@ -120,12 +121,18 @@ export class VectorStore {
   /**
    * Upsert chunks keyed by a stable record id (= chunkId), so re-ingesting a document
    * overwrites rather than duplicating (FR-ING-007 — chunks keyed by (document, seq)).
+   * ONE statement for the whole batch: per-chunk UPSERTs each became their own IndexedDB
+   * transaction through the serial queue (30 chunks = 30 round-trips = the seconds-long
+   * "indexing…" stall after every save), while the embedding itself was near-instant.
    */
   async upsertChunks(records: ChunkRecord[]): Promise<void> {
-    for (const r of records) {
-      await this.q(
-        'UPSERT type::thing("chunk", $cid) CONTENT { chunkId: $cid, docId: $docId, text: $text, page: $page, charStart: $cs, charEnd: $ce, embedding: $emb }',
-        {
+    if (records.length === 0) return;
+    await this.q(
+      `FOR $r IN $records {
+         UPSERT type::thing("chunk", $r.cid) CONTENT { chunkId: $r.cid, docId: $r.docId, text: $r.text, page: $r.page, charStart: $r.cs, charEnd: $r.ce, embedding: $r.emb };
+       }`,
+      {
+        records: records.map((r) => ({
           cid: r.chunkId,
           docId: r.docId,
           text: r.text,
@@ -133,9 +140,9 @@ export class VectorStore {
           cs: r.charStart,
           ce: r.charEnd,
           emb: r.embedding
-        }
-      );
-    }
+        }))
+      }
+    );
   }
 
   /** Cosine top-K KNN over the HNSW index (FR-RET-001). Returns hits in descending score. */
@@ -155,6 +162,52 @@ export class VectorStore {
       charEnd: row.charEnd,
       score: 1 - row.dist // cosine similarity = 1 − cosine distance (DATA-MODEL §4)
     }));
+  }
+
+  /**
+   * Exact-term lexical recall channel (FR-RET-003, the recall half): chunks that literally contain a
+   * query term, found INDEPENDENTLY of the HNSW ranking. Pure-vector retrieval is weakest exactly
+   * where literal match is total — an invoice ID, a person's name, a Vietnamese proper noun the
+   * embedding fragments — and `hybridRerank` can't recover those because it only re-orders what the
+   * vector pass already returned. Over-fetches with substring CONTAINS in-DB (a table scan — fine at
+   * browser-vault scale), then keeps only WHOLE-WORD matches (no "end" inside "spend") ranked by
+   * term-hit count, then cosine. `score` is the cosine similarity so hits display on the seed scale.
+   */
+  async lexicalSearch(queryVec: number[], terms: string[], k = 8): Promise<SearchHit[]> {
+    const clean = [
+      ...new Set(terms.map((t) => t.toLowerCase().trim()).filter((t) => t.length >= 3))
+    ].slice(0, 8);
+    if (clean.length === 0) return [];
+    // string::contains (NOT the CONTAINS operator — that's array membership) does the substring scan;
+    // the whole-word precision pass (wordTermScore) runs in JS below to drop "end"-inside-"spend".
+    const conds = clean
+      .map((_, i) => `string::contains(string::lowercase(text), $t${i})`)
+      .join(' OR ');
+    const [rows] = await this.q<[ChunkRow[]]>(
+      `SELECT chunkId, docId, text, page, charStart, charEnd,
+              vector::similarity::cosine(embedding, $q) AS dist
+       FROM chunk WHERE ${conds}`,
+      { q: queryVec, ...Object.fromEntries(clean.map((t, i) => [`t${i}`, t])) }
+    );
+    return (rows ?? [])
+      .map((row) => ({ row, words: wordTermScore(row.text, clean) }))
+      .filter((x) => x.words > 0)
+      .sort(
+        (a, b) =>
+          b.words - a.words ||
+          b.row.dist - a.row.dist ||
+          (a.row.chunkId < b.row.chunkId ? -1 : a.row.chunkId > b.row.chunkId ? 1 : 0)
+      )
+      .slice(0, Math.max(1, Math.floor(k)))
+      .map(({ row }) => ({
+        chunkId: row.chunkId,
+        docId: row.docId,
+        text: row.text,
+        page: row.page ?? undefined,
+        charStart: row.charStart,
+        charEnd: row.charEnd,
+        score: row.dist // vector::similarity::cosine — already a similarity
+      }));
   }
 
   /** Remove all chunks for a document (re-index / delete — FR-DATA-002/003). */
@@ -231,16 +284,19 @@ export class VectorStore {
     queryId: string,
     hits: { chunkId: string; score: number }[]
   ): Promise<void> {
-    await this.clearRetrieval(queryId);
-    const q = new RecordId('query', queryId);
-    for (let i = 0; i < hits.length; i++) {
-      await this.q('RELATE $q->retrieved_from->$c SET score = $score, rank = $rank', {
-        q,
-        c: new RecordId('chunk', hits[i].chunkId),
-        score: hits[i].score,
-        rank: i + 1
-      });
-    }
+    // Clear + re-relate in ONE statement (not 1 + K round-trips): the Micro-Map refresh rides the
+    // same serial queue as ingest writes, so per-edge RELATEs delayed every other DB consumer.
+    await this.q(
+      `DELETE retrieved_from WHERE in = $q;
+       FOR $h IN $hits {
+         LET $c = type::thing("chunk", $h.chunkId);
+         RELATE $q->retrieved_from->$c SET score = $h.score, rank = $h.rank;
+       }`,
+      {
+        q: new RecordId('query', queryId),
+        hits: hits.map((h, i) => ({ chunkId: h.chunkId, score: h.score, rank: i + 1 }))
+      }
+    );
   }
 
   /** Read back a query's retrieval sub-graph, ordered by rank (FR-GRAPH-001 render input). */
@@ -274,36 +330,65 @@ export class VectorStore {
   // so multi-hop traversal and GraphRAG work across sessions without re-reading the vault. Every edge
   // carries the `docId` that asserted it, for provenance (verifiable answers) and scoped cleanup.
 
-  /** Upsert an entity node keyed by its canonical id (idempotent; last write wins on name/aliases). */
-  async upsertEntity(e: EntityRecord): Promise<void> {
+  /** Upsert entity nodes keyed by canonical id (idempotent; last write wins on name/aliases).
+   *  Whole batch in one statement — a note's 20 entities used to be 20 serialized round-trips. */
+  async upsertEntities(es: EntityRecord[]): Promise<void> {
+    if (es.length === 0) return;
     await this.q(
-      'UPSERT type::thing("entity", $id) CONTENT { entityId: $id, name: $name, type: $type, aliases: $aliases }',
-      { id: e.id, name: e.name, type: e.type, aliases: e.aliases ?? [] }
+      `FOR $e IN $es {
+         UPSERT type::thing("entity", $e.id) CONTENT { entityId: $e.id, name: $e.name, type: $e.type, aliases: $e.aliases };
+       }`,
+      { es: es.map((e) => ({ id: e.id, name: e.name, type: e.type, aliases: e.aliases ?? [] })) }
     );
   }
 
-  /** Record a chunk→entity mention edge, tagged with its doc (provenance + scoped cleanup). */
-  async relateMention(chunkId: string, docId: string, entityId: string): Promise<void> {
-    await this.q('RELATE $c->mentions->$e SET docId = $docId', {
-      c: new RecordId('chunk', chunkId),
-      e: new RecordId('entity', entityId),
-      docId
-    });
+  /** Single-entity convenience over the batch path. */
+  async upsertEntity(e: EntityRecord): Promise<void> {
+    await this.upsertEntities([e]);
   }
 
-  /** Record an entity→entity relation edge with its label + the doc that asserted it. */
+  /** Record chunk→entity mention edges, tagged with their doc (provenance + scoped cleanup).
+   *  One statement for all of a note's mentions — the hottest edge type (entities × chunks). */
+  async relateMentions(edges: MentionEdge[]): Promise<void> {
+    if (edges.length === 0) return;
+    await this.q(
+      `FOR $m IN $ms {
+         LET $c = type::thing("chunk", $m.chunkId);
+         LET $e = type::thing("entity", $m.entityId);
+         RELATE $c->mentions->$e SET docId = $m.docId;
+       }`,
+      { ms: edges.map((m) => ({ chunkId: m.chunkId, entityId: m.entityId, docId: m.docId })) }
+    );
+  }
+
+  /** Single-mention convenience over the batch path. */
+  async relateMention(chunkId: string, docId: string, entityId: string): Promise<void> {
+    await this.relateMentions([{ chunkId, docId, entityId }]);
+  }
+
+  /** Record entity→entity relation edges with their label + the doc that asserted them (batched). */
+  async relateEntityEdges(
+    edges: { sourceId: string; targetId: string; type: string; docId: string }[]
+  ): Promise<void> {
+    if (edges.length === 0) return;
+    await this.q(
+      `FOR $r IN $rs {
+         LET $s = type::thing("entity", $r.sourceId);
+         LET $t = type::thing("entity", $r.targetId);
+         RELATE $s->relates->$t SET type = $r.type, docId = $r.docId;
+       }`,
+      { rs: edges }
+    );
+  }
+
+  /** Single-relation convenience over the batch path. */
   async relateEntities(
     sourceId: string,
     targetId: string,
     type: string,
     docId: string
   ): Promise<void> {
-    await this.q('RELATE $s->relates->$t SET type = $type, docId = $docId', {
-      s: new RecordId('entity', sourceId),
-      t: new RecordId('entity', targetId),
-      type,
-      docId
-    });
+    await this.relateEntityEdges([{ sourceId, targetId, type, docId }]);
   }
 
   /**

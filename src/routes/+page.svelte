@@ -83,6 +83,7 @@
     referencesFromHits,
     relevantHits,
     restrictToEntities,
+    withLexicalChannel,
     type SourceRef
   } from '$lib/retrieval/search';
   import { sourcesFromNotes, sourcesFromHits, parseRedactions } from '$lib/context/sources';
@@ -515,6 +516,11 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
   let indexRunning = false;
   let bgPending = $state(0); // notes waiting/being indexed (drives the unobtrusive header indicator)
   let bgProgress = $state(''); // e.g. "apollo 32/66" for the current job
+  // Notes whose CHUNKS are written (searchable now) but whose entity GRAPH is still extracting. The
+  // LLM extraction is the slow part of indexing on a long note; decoupling it from the embed pass
+  // lets a note become searchable immediately while its graph fills in (non-blocking — see
+  // drainIndexQueue's two passes). Drives a subtle, separate "building graph…" header hint.
+  let graphBuilding = $state(0);
   // Transient "✓ indexed <note> · N entities" confirmation shown in the header when a background
   // index finishes, then auto-clears back to the plain "indexed" pill (FR-UI: visible feedback).
   let indexDone = $state('');
@@ -632,6 +638,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
   let pipe: {
     embed: (t: string) => Promise<number[]>;
     search: (v: number[], k: number) => Promise<SearchHit[]>;
+    lexical: (v: number[], terms: string[], k: number) => Promise<SearchHit[]>;
     relate: (qid: string, hs: SearchHit[]) => Promise<void>;
     ingest: (
       docId: string,
@@ -689,6 +696,9 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     };
   } | null = null;
   let loadedModel = $state('');
+  // The embedder backend on THIS machine (GPU vs CPU) + measured speed — shown in the header so a
+  // user can see whether indexing is GPU-accelerated or silently fell back to the ~15×-slower CPU path.
+  let embedBackend = $state<{ device: '' | 'webgpu' | 'cpu'; chunksPerSec: number } | null>(null);
 
   onMount(async () => {
     coi = crossOriginIsolated;
@@ -737,8 +747,9 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     const embedClient = createEmbedClient();
     const store = new VectorStore();
     try {
-      // -m3 namespace: the 1024-dim bge-m3 index must not collide with an old 384-dim store (ADR-021).
-      await store.connect('indxdb://nebula-app-m3', EMBEDDING_DIM);
+      // -minilm namespace: the 384-dim MiniLM-L12 index must not collide with the old 1024-dim bge-m3
+      // store (a fresh namespace re-seeds + re-indexes the demo vault with the new model on first load).
+      await store.connect('indxdb://nebula-app-minilm', EMBEDDING_DIM);
     } catch (e) {
       // mem:// means NOTHING persists across refresh — surface it rather than silently losing notes.
       console.warn('Nebula: persistent store unavailable, falling back to in-memory:', e);
@@ -846,6 +857,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     pipe = {
       embed: (t) => embedClient.embedQuery(t),
       search: (v, k) => store.search(v, k),
+      lexical: (v, terms, k) => store.lexicalSearch(v, terms, k),
       relate: (qid, hs) =>
         store.relateRetrieval(
           qid,
@@ -871,6 +883,16 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     };
     status = 'ready';
     ready = true;
+    // Warm the embedder in the BACKGROUND now (idle startup), so the user's first save doesn't eat the
+    // one-time WebGPU cold start (model session init + first-inference shader compile). By the time they
+    // write a note it's hot, and indexing is fast from the first save.
+    // backendInfo() both warms the model AND reports GPU-vs-CPU + measured speed for the header chip.
+    void embedClient
+      .backendInfo()
+      .then((info) => {
+        embedBackend = info;
+      })
+      .catch(() => {});
     // Populate the Entities pane from any graph persisted in a prior session — and if the user is
     // landing straight on the Graph tab (restored view) with a graph already present, open the top
     // entity so the node-link map shows immediately rather than an empty "pick an entity" canvas.
@@ -1031,15 +1053,23 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     void drainIndexQueue();
   }
 
-  /** Serially drain the index queue off the save path; the worker does the heavy work (ADR-023/024). */
+  /**
+   * Drain the index queue off the save path in TWO passes (the worker does the heavy embedding —
+   * ADR-023/024). The win for long notes: a note becomes SEARCHABLE the instant its chunks are
+   * written, instead of waiting on the slow LLM entity-extraction. So:
+   *   PASS 1 (embed): write chunks for every queued note — this is the "indexing" pill, and what
+   *     plain RAG needs. Cleared as soon as it's done → the note answers questions immediately.
+   *   PASS 2 (graph): extract + persist each note's entity graph (an LLM pass, the slow part) under
+   *     a SEPARATE, non-blocking "building graph…" hint. The vault is already usable while it runs.
+   */
   async function drainIndexQueue() {
     if (indexRunning || !pipe) return;
     indexRunning = true;
-    let missedGraph = false; // a note whose entities couldn't be extracted (no model) → graph behind
-    let doneCount = 0; // notes successfully indexed this drain (for the completion pill)
-    let entSum = 0; // total entities extracted this drain
-    let failed = 0; // notes whose index threw (surfaced instead of silently swallowed)
+    let failed = 0; // notes whose embed threw (surfaced instead of silently swallowed)
+    let doneCount = 0; // notes whose chunks landed this drain (for the completion pill)
     let lastName = ''; // last note's short name (the common single-note case)
+    // PASS 1 — embed + persist chunks. Makes the note searchable; holds the "indexing" pill.
+    const graphJobs: IndexJob[] = [];
     while (indexJobs.length) {
       const job = indexJobs[0];
       try {
@@ -1050,10 +1080,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
         await pipe.ingest(job.docId, job.body, (done, total) => {
           bgProgress = total > EMBED_PROGRESS_MIN ? `${shortName(job.docId)} ${done}/${total}` : '';
         });
-        // Extract + persist the note's entity graph too (best-effort; needs a loaded model).
-        const ents = await pipe.indexGraph(job.docId, job.body);
-        if (ents === -2) missedGraph = true;
-        if (ents > 0) entSum += ents;
+        graphJobs.push(job); // chunks exist → eligible for graph extraction in pass 2
         lastName = shortName(job.docId);
         doneCount++;
       } catch {
@@ -1065,19 +1092,28 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
       bgPending = indexJobs.length;
       bgProgress = '';
     }
-    indexRunning = false;
-    // Visible confirmation, then auto-revert to the plain "indexed" pill (the user's request).
+    // The note(s) are searchable now — confirm immediately, don't wait on graph extraction.
     if (failed > 0) flashIndexed(`⚠ ${failed} note${failed > 1 ? 's' : ''} failed to index`);
-    else if (doneCount > 0) {
-      const subject = doneCount === 1 ? truncate(lastName, 22) : `${doneCount} notes`;
-      const tail =
-        entSum > 0
-          ? ` · ${entSum} ${entSum === 1 ? 'entity' : 'entities'}`
-          : missedGraph
-            ? ' · graph pending — load a model'
-            : '';
-      flashIndexed(`indexed ${subject}${tail}`);
+    else if (doneCount > 0)
+      flashIndexed(`indexed ${doneCount === 1 ? truncate(lastName, 22) : `${doneCount} notes`}`);
+
+    // PASS 2 — entity graph (LLM extraction): the slow step, run WITHOUT blocking the indexed state.
+    let missedGraph = false; // a note whose entities couldn't be extracted (no model) → graph behind
+    let entSum = 0;
+    graphBuilding = graphJobs.length;
+    for (const job of graphJobs) {
+      try {
+        const ents = await pipe.indexGraph(job.docId, job.body);
+        if (ents === -2) missedGraph = true;
+        if (ents > 0) entSum += ents;
+      } catch {
+        /* graph extraction is best-effort; the note stays searchable regardless */
+      }
+      graphBuilding = Math.max(0, graphBuilding - 1);
     }
+    indexRunning = false;
+    if (entSum > 0)
+      flashIndexed(`graph updated · ${entSum} ${entSum === 1 ? 'entity' : 'entities'}`);
     await refreshEntities(); // once, after the queue drains — never per-job (avoids the read/write race)
     // If extraction ran (a model was loaded), the graph is current — clear any prior stale flag and
     // refresh the open entity canvas so a new note's entities show without a manual rebuild. If it
@@ -1088,6 +1124,8 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
       graphStale = false;
       if (rightView === 'graph' && selectedEntity) await openEntity(selectedEntity);
     }
+    // New saves can arrive during the (slow) graph pass — drain them now that we've released the lock.
+    if (indexJobs.length) void drainIndexQueue();
   }
 
   /** Rebuild the Entities pane from the persisted graph (after ingest / index / delete). Phase 2. */
@@ -1894,6 +1932,15 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
       let relevant: SearchHit[] = [];
       const expandedIds = new Set<string>();
       let expandedForLabels: ExpandedHit[] = [];
+      // Exact-term lexical recall channel (FR-RET-003, the recall half): retrieved INDEPENDENTLY of
+      // the HNSW ranking, so a chunk that literally names the query's subject (an ID, a person, a
+      // proper noun the embedding fragments) reaches the context even when cosine ranked it outside
+      // top-K — hybridRerank alone can't recover those (it only re-orders what vector returned).
+      // Best-effort: a lexical failure must never take down the ask.
+      const qTerms = queryTerms(q);
+      const lexical = qTerms.length
+        ? filterByScope(await pipe.lexical(qv, qTerms, 8).catch(() => [] as SearchHit[]), scopeIds)
+        : [];
       if (graphRagOn) {
         // GraphRAG (Phase 3): vector seeds + graph-connected siblings. The relevance floor still
         // gates the SEEDS (irrelevant notes must never anchor the answer — same precision as plain
@@ -1910,14 +1957,30 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
         const seedRelevant = relevantHits(filterByScope(rag.seeds, scopeIds));
         if (seedRelevant.length > 0) {
           const expandedScoped = filterByScope(rag.expanded, scopeIds);
-          relevant = selectGraphRagContext(seedRelevant, expandedScoped);
+          relevant = withLexicalChannel(
+            selectGraphRagContext(seedRelevant, expandedScoped),
+            lexical
+          );
           const seedIds = new Set(seedRelevant.map((h) => h.chunkId));
-          for (const h of relevant) if (!seedIds.has(h.chunkId)) expandedIds.add(h.chunkId);
+          // Label only TRUE graph siblings as "+N graph-connected" — lexical top-ups are not.
+          const graphIds = new Set(rag.expanded.map((h) => h.chunkId));
+          for (const h of relevant)
+            if (!seedIds.has(h.chunkId) && graphIds.has(h.chunkId)) expandedIds.add(h.chunkId);
+        } else {
+          // No vector seed cleared the relevance floor — the LEXICAL RESCUE: if a chunk literally
+          // names the query's exact term, surface it rather than a silent no-results (embeddings
+          // are weakest exactly where literal match is total, e.g. IDs / rare proper nouns).
+          relevant = withLexicalChannel([], lexical);
         }
       } else {
         // Plain RAG: over-fetch → precision floor (ADR-018) drops the low-score tail so References,
         // Micro-Map, and the grounded context carry only genuinely relevant notes (FR-CHAT-002).
-        relevant = relevantHits(filterByScope(await pipe.search(qv, scope ? 24 : 12), scopeIds));
+        // The lexical channel then tops up exact-term matches the vector pass missed (or rescues
+        // an empty floor result — same rule as the GraphRAG branch).
+        relevant = withLexicalChannel(
+          relevantHits(filterByScope(await pipe.search(qv, scope ? 24 : 12), scopeIds)),
+          lexical
+        );
       }
       // Hybrid precision (FR-RET-003): re-rank the relevance-floor survivors by fusing their vector
       // rank with an exact-term lexical rank, so a note that's merely TOPICALLY similar (e.g. another
@@ -1926,7 +1989,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
       // polluting Sources + wasting a context slot. Pure cosine can't tell "Project Harmony's budget"
       // from an unrelated invoice; proper-noun overlap can. No-op when the query shares no lexical
       // term with any hit (recall preserved), and cosine scores are untouched (only the order shifts).
-      const reranked = hybridRerank(relevant, queryTerms(q));
+      const reranked = hybridRerank(relevant, qTerms);
       // …then EXCLUDE cross-subject noise outright (not just demote it): anchor on the KNOWLEDGE GRAPH
       // to the query's SUBJECT CLUSTER (notes mentioning a named entity + their co-occurring-entity
       // siblings, 2 hops). Another deal's invoice that merely shares a topic word ("budget") — or got
@@ -2564,6 +2627,12 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
         <span class="pill busy-pill"
           ><span class="spinner"></span>indexing{bgProgress ? ` ${bgProgress}` : ''}</span
         >
+      {:else if graphBuilding > 0}
+        <span
+          class="pill busy-pill"
+          title="Chunks are indexed and searchable; the entity graph is still extracting (background)"
+          ><span class="spinner"></span>building graph…</span
+        >
       {:else if indexDone}
         <span class="pill ok-pill" title="Background indexing finished">
           {@render ic('check', 13)}
@@ -2571,6 +2640,16 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
         >
       {:else if ready}
         <span class="pill ok-pill">{@render ic('check', 13)} indexed</span>
+      {/if}
+      {#if embedBackend && embedBackend.device}
+        <span
+          class="pill {embedBackend.device === 'webgpu' ? 'ok-pill' : 'warn-pill'}"
+          title={embedBackend.device === 'webgpu'
+            ? `Embedding runs on the GPU (WebGPU) — ${embedBackend.chunksPerSec} chunks/sec`
+            : `Embedding fell back to CPU (~${embedBackend.chunksPerSec} chunks/sec) — much slower than GPU. Check that WebGPU is enabled in your browser (e.g. chrome://flags, hardware acceleration).`}
+        >
+          {#if embedBackend.device === 'webgpu'}{@render ic('bolt', 12)}GPU{:else}CPU · slow{/if}
+        </span>
       {/if}
       <a
         class="icon-btn nb-hov nb-press"
@@ -3877,6 +3956,12 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     background: var(--accent-soft);
     color: var(--accent-ink);
     border: none;
+  }
+  .warn-pill {
+    background: var(--warn-soft);
+    color: var(--warn);
+    border: none;
+    cursor: help;
   }
 
   /* model banner */

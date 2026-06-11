@@ -2,12 +2,12 @@ import { describe, it, expect } from 'vitest';
 import { embed, embedBatch, makeBgeTokenCounter } from '../../src/lib/embed/embedder';
 import { EMBEDDING_DIM, EMBEDDING_MAX_TOKENS } from '../../src/lib/inference/provider';
 
-// FR-ING-004 — REAL bge-m3 multilingual embeddings on CPU (no GPU). Proves the degraded-tier
+// FR-ING-004 — REAL MiniLM-L12 multilingual embeddings on CPU (no GPU). Proves the degraded-tier
 // semantic path (FR-CAP-002) actually runs headless, and that non-English (Vietnamese) retrieval
-// works — the reason we moved off the English-only bge-small (ADR-021).
+// works — the reason we use a multilingual embedder (ADR-021).
 
-describe('embed — real 1024-dim normalized vectors', () => {
-  it('produces a 1024-dim L2-normalized vector', async () => {
+describe('embed — real EMBEDDING_DIM normalized vectors', () => {
+  it('produces an EMBEDDING_DIM L2-normalized vector', async () => {
     const v = await embed('The launch is scheduled for Q3.');
     expect(v).toHaveLength(EMBEDDING_DIM);
     const norm = Math.sqrt(v.reduce((s, x) => s + x * x, 0));
@@ -47,7 +47,7 @@ describe('makeBgeTokenCounter — the real tokenizer that closes R-1', () => {
   it('counts tokens and flags text past the embedding window (silent-truncation guard)', async () => {
     const count = await makeBgeTokenCounter();
     expect(count('The launch is scheduled for Q3.')).toBeGreaterThan(0);
-    // Past bge-m3's window → would truncate if chunked naively (the chunker uses THIS counter, ADR-006).
+    // Past the embed window → would truncate if chunked naively (the chunker uses THIS counter, ADR-006).
     const long = 'word '.repeat(EMBEDDING_MAX_TOKENS + 500);
     expect(count(long)).toBeGreaterThan(EMBEDDING_MAX_TOKENS);
   });

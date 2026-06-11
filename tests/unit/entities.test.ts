@@ -4,6 +4,8 @@ import {
   parseEntityResponse,
   normalizeType,
   extractEntities,
+  segmentTokens,
+  mergeExtractions,
   ENTITY_INSTRUCTION
 } from '../../src/lib/graph/entities';
 
@@ -124,5 +126,116 @@ describe('extractEntities', () => {
       expect(res.reason).toBe('error');
       expect(res.detail).toBe('boom');
     }
+  });
+});
+
+describe('segmentTokens', () => {
+  it('splits into consecutive n-token windows, capped at maxSegments', () => {
+    const text = Array.from({ length: 10 }, (_, i) => `w${i}`).join(' ');
+    expect(segmentTokens(text, 4, 4)).toEqual(['w0 w1 w2 w3', 'w4 w5 w6 w7', 'w8 w9']);
+    expect(segmentTokens(text, 4, 2)).toEqual(['w0 w1 w2 w3', 'w4 w5 w6 w7']); // tail dropped by cap
+    expect(segmentTokens('one two', 4, 4)).toEqual(['one two']); // short doc → single segment
+    expect(segmentTokens('   ', 4, 4)).toEqual([]); // blank
+  });
+});
+
+describe('mergeExtractions', () => {
+  it('dedupes entities case-insensitively (first seen wins) and relations by triple', () => {
+    const merged = mergeExtractions([
+      {
+        entities: [{ name: 'Acme', type: 'org' }],
+        relations: [{ source: 'Acme', target: 'Beta', type: 'acquired' }]
+      },
+      {
+        entities: [
+          { name: 'acme', type: 'org' },
+          { name: 'Beta', type: 'org' }
+        ],
+        relations: [
+          { source: 'acme', target: 'beta', type: 'acquired' }, // dup triple (case-insensitive)
+          { source: 'Beta', target: 'Acme', type: 'supplies' }
+        ]
+      }
+    ]);
+    expect(merged.entities).toEqual([
+      { name: 'Acme', type: 'org' },
+      { name: 'Beta', type: 'org' }
+    ]);
+    expect(merged.relations).toEqual([
+      { source: 'Acme', target: 'Beta', type: 'acquired' },
+      { source: 'Beta', target: 'Acme', type: 'supplies' }
+    ]);
+  });
+});
+
+describe('extractEntities — segmented long-doc extraction (graph recall)', () => {
+  // The recall blind spot this fixes: the old single-skim pass only ever read the first
+  // `skimTokens` words, so an entity introduced past that point never got a graph node and
+  // GraphRAG could never expand into the note's tail.
+  it('extracts entities introduced BEYOND the first skim window', async () => {
+    const filler = Array.from({ length: 6 }, (_, i) => `word${i}`).join(' ');
+    const text = `Acme leads here. ${filler} Zenith appears only in the tail.`;
+    const prompts: string[] = [];
+    const gen = async (p: string) => {
+      prompts.push(p);
+      // Key on the EXCERPT (after the marker), not the whole prompt — the instruction's worked
+      // example literally contains "Acme", so matching the full prompt would always hit segment 1.
+      const excerpt = p.slice(p.indexOf('# Document excerpt'));
+      if (excerpt.includes('Zenith'))
+        return '{"entities":[{"name":"Zenith","type":"org"}],"relations":[]}';
+      return '{"entities":[{"name":"Acme","type":"org"}],"relations":[]}';
+    };
+    const res = await extractEntities(text, gen, { skimTokens: 6, maxSegments: 4 });
+    expect(prompts.length).toBeGreaterThan(1); // really read more than one window
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.extraction.entities).toEqual(
+        expect.arrayContaining([
+          { name: 'Acme', type: 'org' },
+          { name: 'Zenith', type: 'org' }
+        ])
+      );
+    }
+  });
+
+  it('caps the number of segments (bounded LLM cost on huge docs)', async () => {
+    const text = Array.from({ length: 100 }, (_, i) => `w${i}`).join(' ');
+    let calls = 0;
+    const gen = async () => {
+      calls++;
+      return '{"entities":[{"name":"X","type":"concept"}],"relations":[]}';
+    };
+    await extractEntities(text, gen, { skimTokens: 10, maxSegments: 3 });
+    expect(calls).toBe(3);
+  });
+
+  it('makes a single call for a short doc (unchanged fast path)', async () => {
+    let calls = 0;
+    const gen = async () => {
+      calls++;
+      return '{"entities":[{"name":"Acme","type":"org"}],"relations":[]}';
+    };
+    await extractEntities('Acme signed a deal.', gen);
+    expect(calls).toBe(1);
+  });
+
+  it('is best-effort per segment: one unparseable segment does not discard the others', async () => {
+    const text = Array.from({ length: 12 }, (_, i) => `w${i}`).join(' ');
+    let call = 0;
+    const gen = async () => {
+      call++;
+      if (call === 1) return 'I cannot do that';
+      return '{"entities":[{"name":"Tail","type":"concept"}],"relations":[]}';
+    };
+    const res = await extractEntities(text, gen, { skimTokens: 6, maxSegments: 2 });
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.extraction.entities).toEqual([{ name: 'Tail', type: 'concept' }]);
+  });
+
+  it('returns the first failure when EVERY segment fails', async () => {
+    const text = Array.from({ length: 12 }, (_, i) => `w${i}`).join(' ');
+    const res = await extractEntities(text, async () => 'junk', { skimTokens: 6, maxSegments: 2 });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.reason).toBe('unparseable');
   });
 });

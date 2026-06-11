@@ -63,11 +63,13 @@ export interface InferenceProvider {
 // entries in that catalog. (Earlier ADR-007 framing: Phi-3-mini default / Llama-3.1-8B opt-in.)
 export const DEFAULT_CHAT_MODEL = 'Phi-3-mini-4k-instruct-q4f16_1-MLC';
 export const OPTIONAL_CHAT_MODEL = 'Llama-3.1-8B-Instruct-q4f16_1-MLC';
-// Multilingual embedder (ADR-021): `bge-m3` (XLM-RoBERTa) embeds 100+ languages — incl. Vietnamese
-// — into a shared space, so retrieval works on non-English notes where the old English-only
-// `bge-small-en` scored poorly. Dense vectors are 1024-dim, CLS-pooled + L2-normalized. Quantized
-// (q8) so the in-browser download stays reasonable. Everything reads EMBEDDING_DIM, so the swap is
-// the three constants below + the store namespace bump.
-export const EMBEDDING_MODEL = 'Xenova/bge-m3';
-export const EMBEDDING_DIM = 1024;
-export const EMBEDDING_MAX_TOKENS = 8192; // bge-m3 context (chunks stay far under this)
+// Multilingual embedder: `paraphrase-multilingual-MiniLM-L12-v2` (118M) embeds 50+ languages — incl.
+// Vietnamese — into a shared space. Switched from bge-m3 (568M) for SPEED: on a real GPU it embeds
+// ~1.9× faster, and on a head-to-head Vietnamese cross-lingual eval it MATCHED bge-m3's retrieval
+// (9/10 each on hard semantic queries; MiniLM had the higher separation margins). Dense vectors are
+// 384-dim, MEAN-pooled + L2-normalized. Everything reads EMBEDDING_DIM, so the swap is the three
+// constants below + the store namespace bump (the 384-dim index must not collide with the old
+// 1024-dim bge-m3 store). bge-m3 stays the higher-ceiling option if quality ever needs it.
+export const EMBEDDING_MODEL = 'Xenova/paraphrase-multilingual-MiniLM-L12-v2';
+export const EMBEDDING_DIM = 384;
+export const EMBEDDING_MAX_TOKENS = 512; // MiniLM-L12 position window (chunks are ~60 tokens, far under)

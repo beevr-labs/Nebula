@@ -1,7 +1,7 @@
 // Main-thread client for the embedding Worker (ADR-023). Wraps postMessage in promises and routes
 // `progress` callbacks, so callers `await client.indexText(...)` while the heavy work runs off-thread.
 
-import type { EmbeddedChunk } from './embed.worker';
+import type { EmbeddedChunk, EmbedBackendInfo } from './embed.worker';
 
 export interface EmbedClient {
   embedQuery: (text: string) => Promise<number[]>;
@@ -10,6 +10,8 @@ export interface EmbedClient {
     opts: { size: number; overlap: number },
     onProgress?: (done: number, total: number) => void
   ) => Promise<EmbeddedChunk[]>;
+  /** Which backend the embedder loaded on + a measured throughput (GPU vs CPU diagnosis). */
+  backendInfo: () => Promise<EmbedBackendInfo>;
   terminate: () => void;
 }
 
@@ -58,6 +60,7 @@ export function createEmbedClient(): EmbedClient {
         { text, size: opts.size, overlap: opts.overlap },
         onProgress
       ),
+    backendInfo: () => call<EmbedBackendInfo>('embedInfo', {}),
     terminate: () => worker.terminate()
   };
 }

@@ -19,15 +19,19 @@ import type { EntityRecord } from '$lib/graph/types';
  *  model tends to label everything the same generic type). Forgiving floor; matches ADR-032. */
 export const RELATION_CONFIDENCE_FLOOR = 0.5;
 
-/** The slice of the persistence layer this orchestration needs. VectorStore satisfies it. */
+/** The slice of the persistence layer this orchestration needs. VectorStore satisfies it.
+ *  Batch-shaped on purpose: persisting a note is a handful of statements regardless of how many
+ *  entities/edges it has — per-item calls each became their own serialized DB round-trip. */
 export interface GraphIngestStore {
   getGraphHash(docId: string): Promise<string | null>;
   setGraphHash(docId: string, hash: string): Promise<void>;
   clearDocGraph(docId: string): Promise<void>;
-  upsertEntity(e: EntityRecord): Promise<void>;
+  upsertEntities(es: EntityRecord[]): Promise<void>;
   chunkTextsForDoc(docId: string): Promise<{ chunkId: string; text: string }[]>;
-  relateMention(chunkId: string, docId: string, entityId: string): Promise<void>;
-  relateEntities(sourceId: string, targetId: string, type: string, docId: string): Promise<void>;
+  relateMentions(edges: { chunkId: string; docId: string; entityId: string }[]): Promise<void>;
+  relateEntityEdges(
+    edges: { sourceId: string; targetId: string; type: string; docId: string }[]
+  ): Promise<void>;
 }
 
 export type IngestGraphResult =
@@ -95,22 +99,25 @@ async function persistResolvedGraph(
   g: ResolvedGraph
 ): Promise<number> {
   await store.clearDocGraph(docId);
-  for (const e of g.entities) await store.upsertEntity(e);
+  await store.upsertEntities(g.entities);
 
   const chunks = await store.chunkTextsForDoc(docId);
   const lc = chunks.map((c) => ({ chunkId: c.chunkId, text: c.text.toLowerCase() }));
+  const mentions: { chunkId: string; docId: string; entityId: string }[] = [];
   for (const e of g.entities) {
     const surfaces = [e.name, ...e.aliases].map((s) => s.toLowerCase()).filter(Boolean);
     for (const c of lc) {
       if (surfaces.some((s) => c.text.includes(s)))
-        await store.relateMention(c.chunkId, docId, e.id);
+        mentions.push({ chunkId: c.chunkId, docId, entityId: e.id });
     }
   }
+  await store.relateMentions(mentions);
 
-  for (const r of g.relations) {
-    if ((r.confidence ?? 1) < RELATION_CONFIDENCE_FLOOR) continue;
-    await store.relateEntities(r.sourceId, r.targetId, r.type, docId);
-  }
+  await store.relateEntityEdges(
+    g.relations
+      .filter((r) => (r.confidence ?? 1) >= RELATION_CONFIDENCE_FLOOR)
+      .map((r) => ({ sourceId: r.sourceId, targetId: r.targetId, type: r.type, docId }))
+  );
 
   await store.setGraphHash(docId, graphHash(text));
   return g.entities.length;

@@ -50,14 +50,20 @@ export type ExtractionResult =
   | { ok: false; reason: 'no_model' | 'unparseable' | 'error'; detail?: string };
 
 export interface ExtractOptions {
-  skimTokens?: number; // how much of the doc to read (default 1200)
-  maxEntities?: number; // clamp entity count (default 20)
-  maxRelations?: number; // clamp relation count (default 30)
+  skimTokens?: number; // whitespace-token window per extraction segment (default 1200)
+  maxSegments?: number; // how many consecutive segments of a long doc to extract (default 2)
+  maxEntities?: number; // clamp entity count per segment (default 20)
+  maxRelations?: number; // clamp relation count per segment (default 30)
   maxTokens?: number; // generation budget (default 512)
   signal?: AbortSignal;
 }
 
 export const DEFAULT_SKIM_TOKENS = 1200;
+// Each segment is a SEPARATE LLM generation — the single slowest step of indexing a long note. 2
+// covers ~2400 words (well past the old single-skim blind spot) while keeping the worst-case graph
+// cost at 2× a generation, not 4×. The graph pass is backgrounded (drainIndexQueue), so this bounds
+// how long "building graph…" lingers without ever blocking search.
+export const DEFAULT_MAX_SEGMENTS = 2;
 export const DEFAULT_MAX_ENTITIES = 20;
 export const DEFAULT_MAX_RELATIONS = 30;
 
@@ -182,8 +188,51 @@ export function parseEntityResponse(raw: string, opts: ExtractOptions = {}): Ext
 }
 
 /**
- * Skim-read a document and extract its entity graph. Reaches the LLM via the injected generator;
- * a `null` generator (no model loaded) degrades to `no_model` so the caller can flag the note for
+ * Split a document into consecutive `n`-whitespace-token segments, capped at `maxSegments`. NOTE:
+ * "tokens" here are WHITESPACE tokens (words in English, syllables in Vietnamese), not BPE tokens —
+ * same unit as `firstTokens`. Pure; [] for blank text.
+ */
+export function segmentTokens(text: string, n: number, maxSegments: number): string[] {
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  const out: string[] = [];
+  for (let i = 0; i < words.length && out.length < maxSegments; i += n) {
+    out.push(words.slice(i, i + n).join(' '));
+  }
+  return out;
+}
+
+/** Merge per-segment extractions: entities deduped by name (case-insensitive, first seen wins),
+ *  relations deduped by (source, target, type). Pure; resolveExtraction canonicalizes further. */
+export function mergeExtractions(parts: Extraction[]): Extraction {
+  const entities: ExtractedEntity[] = [];
+  const seenEnt = new Set<string>();
+  const relations: ExtractedRelation[] = [];
+  const seenRel = new Set<string>();
+  for (const p of parts) {
+    for (const e of p.entities) {
+      const key = e.name.toLowerCase();
+      if (seenEnt.has(key)) continue;
+      seenEnt.add(key);
+      entities.push(e);
+    }
+    for (const r of p.relations) {
+      const key = `${r.source.toLowerCase()}|${r.target.toLowerCase()}|${r.type}`;
+      if (seenRel.has(key)) continue;
+      seenRel.add(key);
+      relations.push(r);
+    }
+  }
+  return { entities, relations };
+}
+
+/**
+ * Read a document SEGMENT BY SEGMENT and extract its entity graph. The old single-skim version only
+ * ever read the first `skimTokens` words, so a long note's tail produced NO entities — and GraphRAG
+ * could never expand into it (the recall blind spot). Now up to `maxSegments` consecutive windows
+ * are each extracted and merged, so the graph covers ~4800 words by default; the per-note cost is
+ * bounded and paid once per content hash (ingest-graph's incremental guard). Best-effort per
+ * segment: one unparseable segment doesn't discard the others; all failing → the first failure.
+ * A `null` generator (no model loaded) degrades to `no_model` so the caller can flag the note for
  * later extraction instead of failing the ingest — exactly like autotag's `taggable_later` path.
  */
 export async function extractEntities(
@@ -192,15 +241,32 @@ export async function extractEntities(
   opts: ExtractOptions = {}
 ): Promise<ExtractionResult> {
   if (!generate) return { ok: false, reason: 'no_model' };
-  try {
-    const out = await generate(buildEntityPrompt(text, opts), {
-      maxTokens: opts.maxTokens ?? 512,
-      signal: opts.signal
-    });
-    const extraction = parseEntityResponse(out, opts);
-    if (!extraction) return { ok: false, reason: 'unparseable', detail: out.slice(0, 120) };
-    return { ok: true, extraction };
-  } catch (e) {
-    return { ok: false, reason: 'error', detail: e instanceof Error ? e.message : String(e) };
+  const skim = opts.skimTokens ?? DEFAULT_SKIM_TOKENS;
+  const segments = segmentTokens(text, skim, opts.maxSegments ?? DEFAULT_MAX_SEGMENTS);
+  if (segments.length === 0) segments.push(''); // blank doc — keep the single-call contract
+
+  const parts: Extraction[] = [];
+  let firstFail: ExtractionResult | null = null;
+  for (const seg of segments) {
+    try {
+      const out = await generate(buildEntityPrompt(seg, opts), {
+        maxTokens: opts.maxTokens ?? 512,
+        signal: opts.signal
+      });
+      const extraction = parseEntityResponse(out, opts);
+      if (extraction) parts.push(extraction);
+      else if (!firstFail)
+        firstFail = { ok: false, reason: 'unparseable', detail: out.slice(0, 120) };
+    } catch (e) {
+      if (!firstFail)
+        firstFail = {
+          ok: false,
+          reason: 'error',
+          detail: e instanceof Error ? e.message : String(e)
+        };
+      break; // a throw (abort / model gone) won't get better on the next segment
+    }
   }
+  if (parts.length === 0) return firstFail ?? { ok: false, reason: 'unparseable' };
+  return { ok: true, extraction: mergeExtractions(parts) };
 }
