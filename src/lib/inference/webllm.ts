@@ -59,7 +59,32 @@ const APP_CONFIG: webllm.AppConfig = { ...webllm.prebuiltAppConfig, cacheBackend
 // loadModel() PROBES json mode once with a tiny request; on timeout it recreates the engine
 // (clean queue) and pins the session to plain decode. Real requests then never hit the hang.
 let jsonModeOK = true;
-const JSON_PROBE_TIMEOUT_MS = 15_000;
+// A working probe answers in <1s, so 8s is ample; a broken one hangs forever, so failing faster
+// just shortens the one-time penalty.
+const JSON_PROBE_TIMEOUT_MS = 8_000;
+
+// Persist the "JSON mode is broken on this browser" verdict so the costly probe (timeout + engine
+// rebuild) is paid ONCE per browser, not on every model load. The breakage is environmental (the
+// grammar/WebGPU backend under COEP — see above), i.e. stable per origin, so caching is safe: a
+// false "broken" only pins to plain decode, which works fine. Version-scoped so a WebLLM upgrade
+// that fixes grammar re-probes. localStorage is guarded for non-browser (SSR/test) contexts.
+const JSON_BROKEN_KEY = 'nebula:json-mode-broken:v1';
+
+function jsonModeKnownBroken(): boolean {
+  try {
+    return typeof localStorage !== 'undefined' && localStorage.getItem(JSON_BROKEN_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function rememberJsonModeBroken(): void {
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.setItem(JSON_BROKEN_KEY, '1');
+  } catch {
+    /* private mode / quota — fine, we just re-probe next load */
+  }
+}
 
 class DeadlineError extends Error {
   constructor(ms: number) {
@@ -151,6 +176,11 @@ export class WebLLMProvider implements InferenceProvider {
    */
   private async probeJsonMode(): Promise<void> {
     if (!jsonModeOK || !this.engine) return; // a previous engine already proved it broken here
+    // Already known broken on this browser → skip the probe entirely (no timeout, no rebuild).
+    if (jsonModeKnownBroken()) {
+      jsonModeOK = false;
+      return;
+    }
     const probe = this.engine.chat.completions.create({
       stream: false,
       temperature: 0,
@@ -162,6 +192,7 @@ export class WebLLMProvider implements InferenceProvider {
       await withDeadline(probe, JSON_PROBE_TIMEOUT_MS);
     } catch (e) {
       jsonModeOK = false;
+      rememberJsonModeBroken(); // never pay the probe + rebuild again on this browser
       console.warn('Nebula: JSON-mode generation unavailable here — plain decode this session:', e);
       if (e instanceof DeadlineError) await this.unwedge(probe);
     }
