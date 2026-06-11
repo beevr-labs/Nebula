@@ -12,7 +12,13 @@
   import { buildTitleIndex, notePreview } from '$lib/weave/weaver';
   import { buildMicroGraph, type MicroGraph } from '$lib/graph/micrograph';
   import { selectGraphRagContext } from '$lib/retrieval/graphrag';
-  import { ingestDocGraph, seedDocGraph } from '$lib/graph/ingest-graph';
+  import {
+    ingestDocGraph,
+    ingestVaultGraph,
+    seedDocGraph,
+    type IngestGraphResult,
+    type VaultGraphProgress
+  } from '$lib/graph/ingest-graph';
   import type { Extraction, ExtractedRelation } from '$lib/graph/entities';
   import { buildEntityIndex, type EntityEntry } from '$lib/graph/entity-index';
   import { buildEntityGraph, type EntityGraph, type GraphNeighbor } from '$lib/graph/entity-graph';
@@ -661,6 +667,10 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
       entityIds: string[];
     }>;
     indexGraph: (docId: string, text: string) => Promise<number>;
+    indexGraphVault: (
+      docs: { docId: string; text: string }[],
+      onBatch?: (p: VaultGraphProgress) => void | Promise<void>
+    ) => Promise<Map<string, IngestGraphResult>>;
     seedGraph: (docId: string, text: string, extraction: Extraction) => Promise<number>;
     clearGraph: (docId: string) => Promise<void>;
     entityData: () => Promise<{
@@ -870,6 +880,14 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
       forgetNote: (docId) => store.deleteNote(docId),
       graphRag: (v, opts) => store.graphRagSearch(v, opts),
       indexGraph,
+      // Vault-wide rebuild: same generator seam, but short notes are PACKED into batched LLM calls
+      // (one generation extracts several notes) — the per-note fixed cost was what made "build
+      // graph" on a many-note vault take minutes. Hash-unchanged notes still cost zero calls.
+      indexGraphVault: (docs, onBatch) => {
+        const gen: TextGenerator | null =
+          loadedModel && provider.complete ? (p, o) => provider.complete(p, o) : null;
+        return ingestVaultGraph(store, docs, gen, { onBatch });
+      },
       seedGraph: (docId, text, extraction) => seedDocGraph(store, docId, text, extraction),
       clearGraph: (docId) => store.clearDocGraph(docId),
       entityData: async () => ({
@@ -1281,23 +1299,27 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     }
     graphBusy = true;
     try {
+      const todo = vault.filter((n) => n.docId !== TOUR_DOC); // tour note never joins the graph
+      // Batched vault extraction (ingestVaultGraph): short notes are packed several-per-LLM-call,
+      // long notes keep the segmented solo path, unchanged notes skip on their hash. Progressive:
+      // after each settled batch the status ticks and — when new entities landed — the pane
+      // refreshes, so the graph fills in during the slow LLM pass instead of looking frozen.
       let extracted = 0;
       let skipped = 0;
-      const todo = vault.filter((n) => n.docId !== TOUR_DOC); // tour note never joins the graph
-      let i = 0;
-      for (const n of todo) {
-        i++;
-        status = `extracting entities: ${shortName(n.docId)} (${i}/${todo.length})…`;
-        const r = await pipe.indexGraph(n.docId, n.text).catch(() => 0);
-        if (r === -1) skipped++;
-        else if (r > 0) {
-          extracted++;
-          // Show entities as they land — refresh the pane after EACH extracted note so the graph
-          // fills in progressively instead of staying empty until the whole (slow) LLM pass ends.
-          // (Skipped notes don't change the graph, so they don't trigger a read.)
-          await refreshEntities();
+      let lastRefreshed = 0;
+      await pipe.indexGraphVault(
+        todo.map((n) => ({ docId: n.docId, text: n.text })),
+        async (p) => {
+          extracted = p.extracted;
+          skipped = p.skipped;
+          if (p.label)
+            status = `extracting entities: ${shortName(p.label)} (${p.done}/${p.total})…`;
+          if (p.extracted > lastRefreshed) {
+            lastRefreshed = p.extracted;
+            await refreshEntities();
+          }
         }
-      }
+      );
       await refreshEntities();
       graphStale = false; // the whole vault was just (re)extracted — nothing is behind anymore
       status =

@@ -66,6 +66,9 @@ export const DEFAULT_SKIM_TOKENS = 1200;
 export const DEFAULT_MAX_SEGMENTS = 2;
 export const DEFAULT_MAX_ENTITIES = 20;
 export const DEFAULT_MAX_RELATIONS = 30;
+// Cap on notes per BATCHED extraction call (ingestVaultGraph): past ~6 docs a small model starts
+// merging documents or dropping ids, and the output budget per doc gets too thin to trust.
+export const DEFAULT_BATCH_MAX_DOCS = 6;
 
 // Versioned instruction (PROMPTS): changing it must re-run the extraction parse tests.
 // The worked example is load-bearing — small models default EVERY relation to one generic type
@@ -130,15 +133,12 @@ function normalizeRelType(value: unknown): string {
 }
 
 /**
- * Parse + normalize an LLM extraction response. Tolerant of code fences and surrounding prose.
- * Entities are deduped by name (case-insensitive) and clamped; relations are kept only when both
- * endpoints name an extracted entity (the model is told to honor this, but small models drift).
- * Returns null when no JSON object can be recovered (caller → degrade, never a hard failure).
+ * Normalize one already-parsed extraction object (`{entities, relations}`) into a clamped, deduped
+ * Extraction — the shared back half of the single-doc and batched parsers. Entities are deduped by
+ * name (case-insensitive) and clamped; relations are kept only when both endpoints name an
+ * extracted entity (the model is told to honor this, but small models drift).
  */
-export function parseEntityResponse(raw: string, opts: ExtractOptions = {}): Extraction | null {
-  const obj = extractJson(raw);
-  if (!obj) return null;
-
+function normalizeExtraction(obj: Record<string, unknown>, opts: ExtractOptions = {}): Extraction {
   const maxEntities = opts.maxEntities ?? DEFAULT_MAX_ENTITIES;
   const maxRelations = opts.maxRelations ?? DEFAULT_MAX_RELATIONS;
 
@@ -185,6 +185,96 @@ export function parseEntityResponse(raw: string, opts: ExtractOptions = {}): Ext
   }
 
   return { entities, relations };
+}
+
+/**
+ * Parse + normalize an LLM extraction response. Tolerant of code fences and surrounding prose.
+ * Returns null when no JSON object can be recovered (caller → degrade, never a hard failure).
+ */
+export function parseEntityResponse(raw: string, opts: ExtractOptions = {}): Extraction | null {
+  const obj = extractJson(raw);
+  if (!obj) return null;
+  return normalizeExtraction(obj, opts);
+}
+
+// Versioned instruction (PROMPTS): the batched variant of ENTITY_INSTRUCTION — several documents,
+// one generation. Same load-bearing properties as the single version: the worked example keeps
+// small models from collapsing every relation to one generic type, AND (new failure mode here)
+// from merging entities across documents or dropping the per-doc "id".
+export const BATCH_ENTITY_INSTRUCTION = `You are Nebula's knowledge-graph builder. You are given SEVERAL separate documents, each starting with "# Document N". For EACH document, extract its key entities and the relationships EXPLICITLY stated between them. Output ONLY one JSON object — no prose, no code fence, no extra keys.
+
+Schema:
+{"docs":[{"id":1,"entities":[{"name":string,"type":string}],"relations":[{"source":string,"target":string,"type":string,"confidence":number}]}]}
+
+Rules:
+- Output exactly one "docs" item per document, "id" matching that document's number. NEVER merge documents — an entity belongs to the document whose text names it.
+- entities: the important named things — people, organizations, projects, places, concepts, events. Use the name as written (keep original casing and language).
+- type: exactly one of: person, org, project, place, concept, event, other.
+- relations: connect two entities that BOTH appear in the SAME document's entities list. "type" is the SPECIFIC relationship from the text, a short lowercase verb phrase with underscores (e.g. founded, acquired, reports_to, leads, owns, located_in, part_of, replaced, uses, signed, returns). Do NOT label every relation the same generic type — use the actual verb. "confidence" is 0.0–1.0 for how clearly the text states it.
+- A document with nothing to extract still gets its item: {"id":N,"entities":[],"relations":[]}.
+
+Example:
+Input:
+# Document 1
+Acme acquired Beta Corp in 2020. Jane Doe, Acme's CTO, now leads the Helix project.
+# Document 2
+Met Bob at the Hanoi office to plan the Q3 launch.
+Output: {"docs":[{"id":1,"entities":[{"name":"Acme","type":"org"},{"name":"Beta Corp","type":"org"},{"name":"Jane Doe","type":"person"},{"name":"Helix","type":"project"}],"relations":[{"source":"Acme","target":"Beta Corp","type":"acquired","confidence":0.95},{"source":"Jane Doe","target":"Acme","type":"cto_of","confidence":0.9},{"source":"Jane Doe","target":"Helix","type":"leads","confidence":0.9}]},{"id":2,"entities":[{"name":"Bob","type":"person"},{"name":"Hanoi","type":"place"},{"name":"Q3 launch","type":"event"}],"relations":[{"source":"Bob","target":"Hanoi","type":"located_in","confidence":0.7}]}]}
+
+Now extract from the documents below. Output the JSON object and nothing else.`;
+
+/** Assemble the batched strict-JSON extraction prompt — documents numbered from 1. Pure. */
+export function buildBatchEntityPrompt(texts: string[], opts: ExtractOptions = {}): string {
+  const skim = opts.skimTokens ?? DEFAULT_SKIM_TOKENS;
+  const docs = texts.map((t, i) => `# Document ${i + 1}\n${firstTokens(t, skim)}`).join('\n\n');
+  return `${BATCH_ENTITY_INSTRUCTION}\n\n${docs}`;
+}
+
+/**
+ * Parse a batched extraction response into per-document slots (index i ↔ "# Document i+1").
+ * A slot is null when the model dropped that document, gave it a bad/duplicate id, or the whole
+ * response is unparseable — the caller falls back to single-doc extraction for null slots only,
+ * so one flaky slot never costs the rest of the batch. First item per id wins.
+ */
+export function parseBatchEntityResponse(
+  raw: string,
+  count: number,
+  opts: ExtractOptions = {}
+): (Extraction | null)[] {
+  const out: (Extraction | null)[] = Array.from({ length: count }, () => null);
+  const obj = extractJson(raw);
+  if (!obj || !Array.isArray(obj.docs)) return out;
+  for (const item of obj.docs) {
+    if (!item || typeof item !== 'object') continue;
+    const rec = item as Record<string, unknown>;
+    const id = typeof rec.id === 'number' ? Math.trunc(rec.id) : NaN;
+    if (!(id >= 1 && id <= count) || out[id - 1]) continue;
+    out[id - 1] = normalizeExtraction(rec, opts);
+  }
+  return out;
+}
+
+/**
+ * Greedily group items (by whitespace-token size, order-preserving) into batches that fit a token
+ * budget and a per-batch doc cap. An item alone over budget still gets its own group (the prompt
+ * builder skims it down) — callers normally route oversized docs to the segmented solo path first.
+ * Returns groups of ORIGINAL indices. Pure.
+ */
+export function planBatches(sizes: number[], budget: number, maxDocs: number): number[][] {
+  const groups: number[][] = [];
+  let cur: number[] = [];
+  let used = 0;
+  for (let i = 0; i < sizes.length; i++) {
+    if (cur.length > 0 && (used + sizes[i] > budget || cur.length >= maxDocs)) {
+      groups.push(cur);
+      cur = [];
+      used = 0;
+    }
+    cur.push(i);
+    used += sizes[i];
+  }
+  if (cur.length > 0) groups.push(cur);
+  return groups;
 }
 
 /**
