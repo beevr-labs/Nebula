@@ -15,6 +15,7 @@
   import {
     ingestDocGraph,
     ingestVaultGraph,
+    ingestVaultGraphFast,
     seedDocGraph,
     type IngestGraphResult,
     type VaultGraphProgress
@@ -667,6 +668,9 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
       entityIds: string[];
     }>;
     indexGraph: (docId: string, text: string) => Promise<number>;
+    indexGraphFast: (
+      docs: { docId: string; text: string }[]
+    ) => Promise<Map<string, IngestGraphResult>>;
     indexGraphVault: (
       docs: { docId: string; text: string }[],
       onBatch?: (p: VaultGraphProgress) => void | Promise<void>
@@ -880,6 +884,8 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
       forgetNote: (docId) => store.deleteNote(docId),
       graphRag: (v, opts) => store.graphRagSearch(v, opts),
       indexGraph,
+      // Tier-0 instant graph: proper nouns + wikilinks + co-occurrence, no model, milliseconds.
+      indexGraphFast: (docs) => ingestVaultGraphFast(store, docs),
       // Vault-wide rebuild: same generator seam, but short notes are PACKED into batched LLM calls
       // (one generation extracts several notes) — the per-note fixed cost was what made "build
       // graph" on a many-note vault take minutes. Hash-unchanged notes still cost zero calls.
@@ -1136,9 +1142,23 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     } else if (doneCount > 0)
       flashIndexed(`indexed ${doneCount === 1 ? truncate(lastName, 22) : `${doneCount} notes`}`);
 
-    // PASS 2 — entity graph (LLM extraction): the slow step, run WITHOUT blocking the indexed state.
-    let missedGraph = false; // a note whose entities couldn't be extracted (no model) → graph behind
+    // PASS 2 — entity graph in two tiers. TIER 0 first: the instant heuristic graph (proper nouns
+    // + wikilinks + co-occurrence, no model) so a saved note's entities are visible IMMEDIATELY —
+    // even with no chat model loaded. The LLM tier below then enriches (typed relations,
+    // concepts) when a model is available; without one, the heuristic graph stands and the vault
+    // is flagged stale so the enrich is offered.
+    let missedGraph = false; // a note not yet LLM-enriched (no model) → graph behind
     let entSum = 0;
+    if (graphJobs.length) {
+      try {
+        const fast = await pipe.indexGraphFast(
+          graphJobs.map((j) => ({ docId: j.docId, text: j.body }))
+        );
+        if ([...fast.values()].some((r) => r.status === 'ingested')) await refreshEntities();
+      } catch {
+        /* instant tier is best-effort too — the LLM tier below still runs */
+      }
+    }
     graphBuilding = graphJobs.length;
     for (const job of graphJobs) {
       try {
@@ -1290,40 +1310,60 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
       void openEntity({ id, name: node.label, type: node.type ?? '', noteCount: 0, docIds: [] });
   }
 
-  /** One-click: extract the entity graph across the whole vault (loads the model if needed). */
+  /**
+   * One-click vault graph, two tiers:
+   *   PHASE 1 — INSTANT (no model): proper nouns + wikilinks + co-occurrence edges land in
+   *     milliseconds, so the Entities pane / graph lens populate immediately on click.
+   *   PHASE 2 — ENRICH (LLM, loads the model if needed): batched extraction upgrades those notes
+   *     to typed relations + concept entities. The heuristic hash marker makes the LLM pass pick
+   *     up exactly the tier-0 notes; declining the model load keeps the instant graph and flags
+   *     graphStale so the upgrade is offered again later.
+   */
   async function buildVaultGraph() {
     if (!pipe || graphBusy) return;
-    if (!loadedModel) {
-      const ok = await ensureModelLoaded(modelId);
-      if (!ok) return;
-    }
     graphBusy = true;
     try {
       const todo = vault.filter((n) => n.docId !== TOUR_DOC); // tour note never joins the graph
-      // Batched vault extraction (ingestVaultGraph): short notes are packed several-per-LLM-call,
-      // long notes keep the segmented solo path, unchanged notes skip on their hash. Progressive:
-      // after each settled batch the status ticks and — when new entities landed — the pane
-      // refreshes, so the graph fills in during the slow LLM pass instead of looking frozen.
+      const docs = todo.map((n) => ({ docId: n.docId, text: n.text }));
+
+      // PHASE 1 — entities appear NOW, before any model is even loaded.
+      status = 'building graph…';
+      const fast = await pipe.indexGraphFast(docs);
+      const fastIngested = [...fast.values()].filter((r) => r.status === 'ingested').length;
+      if (fastIngested > 0) await refreshEntities();
+      status = `graph ready · ${entityIndex.length} entities — enriching with the model…`;
+
+      if (!loadedModel) {
+        const ok = await ensureModelLoaded(modelId);
+        if (!ok) {
+          // No model — the instant graph stands; mark it behind so the enrich is re-offered.
+          graphStale = true;
+          status = `graph ready · ${entityIndex.length} entities (instant pass — load a model to enrich)`;
+          if (rightView === 'graph' && !selectedEntity && entityIndex.length)
+            void openEntity(entityIndex[0]);
+          return;
+        }
+      }
+
+      // PHASE 2 — batched LLM enrichment (ingestVaultGraph): short notes packed several-per-call,
+      // long notes segmented solo, plain-hash notes skip. Progressive: after each settled batch
+      // the status ticks and — when new entities landed — the pane refreshes.
       let extracted = 0;
       let skipped = 0;
       let lastRefreshed = 0;
-      await pipe.indexGraphVault(
-        todo.map((n) => ({ docId: n.docId, text: n.text })),
-        async (p) => {
-          extracted = p.extracted;
-          skipped = p.skipped;
-          if (p.label)
-            status = `extracting entities: ${shortName(p.label)} (${p.done}/${p.total})…`;
-          if (p.extracted > lastRefreshed) {
-            lastRefreshed = p.extracted;
-            await refreshEntities();
-          }
+      await pipe.indexGraphVault(docs, async (p) => {
+        extracted = p.extracted;
+        skipped = p.skipped;
+        if (p.label) status = `enriching entities: ${shortName(p.label)} (${p.done}/${p.total})…`;
+        if (p.extracted > lastRefreshed) {
+          lastRefreshed = p.extracted;
+          await refreshEntities();
         }
-      );
+      });
       await refreshEntities();
       graphStale = false; // the whole vault was just (re)extracted — nothing is behind anymore
       status =
-        `graph ready · ${entityIndex.length} entities · ${extracted} extracted` +
+        `graph ready · ${entityIndex.length} entities · ${extracted} enriched` +
         (skipped ? `, ${skipped} unchanged (skipped)` : '');
       // If the user is looking at the Graph tab, open the top entity so the node-link map appears
       // right away rather than leaving an empty "pick an entity" canvas after a build.

@@ -21,6 +21,7 @@ import {
   type ExtractOptions,
   type Extraction
 } from '$lib/graph/entities';
+import { extractHeuristic } from '$lib/graph/fast-extract';
 import { resolveExtraction, type ResolvedGraph } from '$lib/graph/resolve';
 import type { EntityRecord } from '$lib/graph/types';
 
@@ -61,6 +62,15 @@ export function graphHash(text: string): string {
   }
   return (h >>> 0).toString(16);
 }
+
+// The TIER MARKER for the instant heuristic pass (fast-extract.ts). A note graphed heuristically
+// stores `h:<hash>` instead of the plain `<hash>`, which makes the two-tier dance fall out of
+// plain string comparison with NO extra state:
+//   - the heuristic pass skips a note whose stored hash matches EITHER form (never overwrites an
+//     LLM/seeded graph with a poorer one, never redoes its own work), and
+//   - the LLM pass only skips on the PLAIN hash, so `h:<hash>` never matches and every
+//     heuristic-tier note is automatically picked up for enrichment.
+export const HEURISTIC_HASH_PREFIX = 'h:';
 
 /**
  * Extract → resolve → persist one note's entity graph. Steps:
@@ -126,7 +136,8 @@ async function persistResolvedGraph(
   store: GraphIngestStore,
   docId: string,
   text: string,
-  g: ResolvedGraph
+  g: ResolvedGraph,
+  hashValue?: string // tier marker override (heuristic pass) — defaults to the plain LLM-tier hash
 ): Promise<number> {
   await store.clearDocGraph(docId);
   await store.upsertEntities(g.entities);
@@ -149,7 +160,7 @@ async function persistResolvedGraph(
       .map((r) => ({ sourceId: r.sourceId, targetId: r.targetId, type: r.type, docId }))
   );
 
-  await store.setGraphHash(docId, graphHash(text));
+  await store.setGraphHash(docId, hashValue ?? graphHash(text));
   return g.entities.length;
 }
 
@@ -167,6 +178,47 @@ export async function seedDocGraph(
   extraction: Extraction
 ): Promise<number> {
   return persistResolvedGraph(store, docId, text, resolveExtraction(extraction));
+}
+
+/**
+ * INSTANT vault graph — the tier-0 pass (fast-extract.ts): proper nouns + wikilinks +
+ * sentence-co-occurrence edges, pure JS, NO model and no LLM calls, so a whole vault graphs in
+ * milliseconds-to-a-second (the cost is the store writes, not the extraction). Skips notes whose
+ * stored hash matches either tier (never clobbers an LLM/seeded graph); persists with the
+ * HEURISTIC_HASH_PREFIX marker so the LLM pass later picks exactly these notes up to enrich.
+ * Returns per-doc results keyed by docId, same contract as ingestVaultGraph.
+ */
+export async function ingestVaultGraphFast(
+  store: GraphIngestStore,
+  docs: { docId: string; text: string }[]
+): Promise<Map<string, IngestGraphResult>> {
+  const results = new Map<string, IngestGraphResult>();
+  for (const d of docs) {
+    const h = graphHash(d.text);
+    const stored = await store.getGraphHash(d.docId);
+    if (stored === h || stored === HEURISTIC_HASH_PREFIX + h) {
+      results.set(d.docId, { status: 'skipped' });
+      continue;
+    }
+    try {
+      const g = resolveExtraction(extractHeuristic(d.text));
+      if (g.entities.length === 0) {
+        results.set(d.docId, { status: 'no_graph' });
+        continue;
+      }
+      const entityCount = await persistResolvedGraph(
+        store,
+        d.docId,
+        d.text,
+        g,
+        HEURISTIC_HASH_PREFIX + h
+      );
+      results.set(d.docId, { status: 'ingested', entityCount });
+    } catch {
+      results.set(d.docId, { status: 'no_graph' }); // best-effort per note, like every graph path
+    }
+  }
+  return results;
 }
 
 /** Cumulative progress after each settled batch — drives the status line + progressive refresh. */
