@@ -11,10 +11,26 @@ import {
   normalizeCitationMarkers,
   parseCitations,
   stripPromptEcho,
-  NO_RESULTS_MESSAGE
+  NO_RESULTS_MESSAGE,
+  EMPTY_ANSWER_MESSAGE
 } from '$lib/chat/prompt';
 
 const MAX_CONTEXT_TOKENS = 4096;
+
+// assemblePrompt budgets context in WHITESPACE WORDS (approxTokenCount), but the model enforces its
+// window in real TOKENS — and real tokens run well above words (~1.3× English, ~1.5–2× Vietnamese
+// split per syllable, more for code). Sizing the word budget at the raw 4096 let a long/Vietnamese
+// note assemble to 5000+ real tokens and overflow the window — WebLLM throws
+// ContextWindowSizeExceededError, which surfaced as a BLANK answer. So derive the WORD budget from
+// the window after reserving the system prompt + the answer, then divide by a conservative
+// word→token blowup. ~1700 words for a 256-token grounded answer; comfortably inside 4096 tokens.
+const WORD_TO_TOKEN = 2; // conservative upper bound (Vietnamese-safe)
+const SYSTEM_RESERVE_TOKENS = 420; // the (largest) system prompt + the question/structure overhead
+
+function contextWordBudget(outputTokens: number): number {
+  const tokenRoom = MAX_CONTEXT_TOKENS - SYSTEM_RESERVE_TOKENS - outputTokens;
+  return Math.max(256, Math.floor(tokenRoom / WORD_TO_TOKEN));
+}
 
 // Persist model weights via WebLLM's IndexedDB cache backend, NOT the default Cache Storage API
 // (supersedes ADR-025). ROOT CAUSE (isolated by live diagnosis): the app is crossOriginIsolated
@@ -164,7 +180,8 @@ export class WebLLMProvider implements InferenceProvider {
     if (!this.engine) throw new Error('Model not loaded');
 
     const prompt = assemblePrompt(req.query, req.context, {
-      maxContextTokens: this.capabilities().maxContextTokens,
+      // WORD budget sized to fit the model's real-token window after the system prompt + answer.
+      maxContextTokens: contextWordBudget(req.maxTokens),
       mode: req.answerMode
     });
     if (prompt.kind === 'no_results') {
@@ -177,38 +194,58 @@ export class WebLLMProvider implements InferenceProvider {
       };
     }
 
+    const messages = buildChatMessages(prompt.system, prompt.user, req.history);
     const start = performance.now();
     let ttftMs = 0;
     let tokens = 0;
     let text = '';
 
-    const stream = await this.engine.chat.completions.create({
-      stream: true,
-      // Low temperature → grounded, reproducible answers (RAG should not be creative).
-      temperature: 0.2,
-      top_p: 0.9,
-      // Replay prior turns before this turn's grounded message so a follow-up keeps the thread.
-      messages: buildChatMessages(prompt.system, prompt.user, req.history)
-    });
+    try {
+      const stream = await this.engine.chat.completions.create({
+        stream: true,
+        // Low temperature → grounded, reproducible answers (RAG should not be creative).
+        temperature: 0.2,
+        top_p: 0.9,
+        // Bound the answer length (the caller sizes it per mode) AND reserve decode room — without
+        // an explicit cap the engine was left to its default.
+        max_tokens: req.maxTokens,
+        // Replay prior turns before this turn's grounded message so a follow-up keeps the thread.
+        messages
+      });
 
-    for await (const part of stream) {
-      if (signal.aborted) {
-        await this.engine.interruptGenerate();
-        throw new DOMException('Generation aborted', 'AbortError');
+      for await (const part of stream) {
+        if (signal.aborted) {
+          await this.engine.interruptGenerate();
+          throw new DOMException('Generation aborted', 'AbortError');
+        }
+        const delta = part.choices[0]?.delta?.content ?? '';
+        if (delta) {
+          if (ttftMs === 0) ttftMs = Math.round(performance.now() - start);
+          text += delta;
+          tokens += 1;
+          onToken(delta);
+        }
       }
-      const delta = part.choices[0]?.delta?.content ?? '';
-      if (delta) {
-        if (ttftMs === 0) ttftMs = Math.round(performance.now() - start);
-        text += delta;
-        tokens += 1;
-        onToken(delta);
-      }
+    } catch (e) {
+      if (e instanceof DOMException && e.name === 'AbortError') throw e; // user cancelled — propagate
+      // Any other generation failure (e.g. a residual ContextWindowSizeExceededError if token
+      // estimation under-counted) must not blank the answer — degrade to the friendly fallback.
+      console.warn('Nebula: generation failed, showing fallback:', e);
+      text = '';
+    }
+
+    // EMPTY-ANSWER RECOVERY. A blank answer is the worst outcome (the notes WERE retrieved), so:
+    //   1. if stripPromptEcho/splitReasoning emptied a non-blank raw answer → keep the raw text;
+    //   2. if nothing survived (genuine empty, or the generation threw above) → a friendly line
+    //      that points at the cited sources instead of showing nothing.
+    let cleaned = normalizeCitationMarkers(stripPromptEcho(text));
+    if (!cleaned.trim() && text.trim()) cleaned = text.trim();
+    if (!cleaned.trim()) {
+      cleaned = EMPTY_ANSWER_MESSAGE;
+      onToken(cleaned);
     }
 
     const seconds = Math.max((performance.now() - start) / 1000, 1e-3);
-    // Defensive: strip any echoed prompt scaffolding the small model emitted, then parse
-    // citations against the CLEANED text so spans line up with what the user sees.
-    const cleaned = normalizeCitationMarkers(stripPromptEcho(text));
     const { citations } = parseCitations(cleaned, prompt.contextOrder);
     return {
       requestId: req.requestId,

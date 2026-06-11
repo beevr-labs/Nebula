@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   assemblePrompt,
+  dedupeHits,
   buildChatMessages,
   normalizeCitationMarkers,
   parseCitations,
@@ -148,6 +149,98 @@ describe('assemblePrompt', () => {
     } else {
       throw new Error('expected grounded');
     }
+  });
+
+  it('truncates a single oversized lead chunk to the budget instead of overflowing the window', () => {
+    // The live blank-answer cause: one note far bigger than the budget (a long transcript read
+    // whole / an unsplit note) was kept verbatim and overflowed the model's context window.
+    const big: SearchHit = {
+      chunkId: 'big',
+      docId: 'notes/long.md',
+      text: Array.from({ length: 400 }, (_, i) => `word${i}`).join(' '),
+      charStart: 0,
+      charEnd: 0,
+      score: 0.9
+    };
+    const r = assemblePrompt('what is in the note?', [big], { maxContextTokens: 30 });
+    if (r.kind !== 'grounded') throw new Error('expected grounded');
+    const words = r.user.split(/\s+/).length;
+    expect(words).toBeLessThan(60); // fits the budget (+ wrapper + directive), not 400 words
+    expect(r.user).toContain('word0'); // kept the START of the note
+    expect(r.user).toContain('…'); // truncation marker
+    expect(r.user).not.toContain('word399'); // the tail was dropped
+    expect(r.contextOrder).toEqual(['big']); // still cited as the source
+  });
+
+  it('collapses near-duplicate chunks so a repetitive note cannot crowd out diverse context', () => {
+    // Mimics the live failure: a repetitive transcript returns many near-identical chunks (top
+    // score) plus the ONE note that actually answers the question lower down.
+    const mk = (id: string, doc: string, text: string, score: number): SearchHit => ({
+      chunkId: id,
+      docId: doc,
+      text,
+      charStart: 0,
+      charEnd: text.length,
+      score
+    });
+    const repetitive = [
+      mk('t1', 'notes/standup.md', 'Hôm nay tôi tiếp tục dự án Orion và trao đổi với Linh.', 0.6),
+      mk('t2', 'notes/standup.md', 'Hôm nay tôi tiếp tục dự án Atlas và trao đổi với Hùng.', 0.59),
+      mk(
+        't3',
+        'notes/standup.md',
+        'Hôm nay tôi tiếp tục dự án Nebula và trao đổi với Trang.',
+        0.58
+      ),
+      mk('ans', 'notes/clients.md', 'Dự án Orion được phát triển cho khách hàng VinGroup.', 0.55)
+    ];
+    const r = assemblePrompt('Orion cho khách hàng nào?', repetitive);
+    if (r.kind !== 'grounded') throw new Error('expected grounded');
+    // one transcript representative survives; the answer note is NOT crowded out
+    expect(r.contextOrder).toContain('ans');
+    expect(r.contextOrder.filter((c) => c.startsWith('t')).length).toBe(1);
+    expect(r.user).toContain('VinGroup');
+  });
+});
+
+describe('dedupeHits', () => {
+  const mk = (id: string, text: string): SearchHit => ({
+    chunkId: id,
+    docId: 'd',
+    text,
+    charStart: 0,
+    charEnd: text.length,
+    score: 1
+  });
+
+  it('drops a chunk that is ≥80% word-overlap with one already kept (keeps the first)', () => {
+    const out = dedupeHits([
+      mk('a', 'Hôm nay tôi tiếp tục dự án Orion và trao đổi với Linh về tích hợp'),
+      mk('b', 'Hôm nay tôi tiếp tục dự án Atlas và trao đổi với Linh về tích hợp')
+    ]);
+    expect(out.map((h) => h.chunkId)).toEqual(['a']);
+  });
+
+  it('keeps genuinely different chunks', () => {
+    const out = dedupeHits([
+      mk('a', 'The project ships in Q3 next year'),
+      mk('b', 'The marketing budget is two million dollars')
+    ]);
+    expect(out.map((h) => h.chunkId)).toEqual(['a', 'b']);
+  });
+
+  it('handles Vietnamese diacritics as whole words (not shredded into ASCII letters)', () => {
+    // identical save for one word → must be treated as duplicates, proving NFKC/Unicode tokenizing
+    const out = dedupeHits([
+      mk('a', 'Cuộc họp hội đồng diễn ra tại Hà Nội vào buổi sáng'),
+      mk('b', 'Cuộc họp hội đồng diễn ra tại Huế vào buổi sáng')
+    ]);
+    expect(out).toHaveLength(1);
+  });
+
+  it('preserves order and is a no-op on already-distinct input', () => {
+    const input = [mk('a', 'alpha one two'), mk('b', 'beta three four'), mk('c', 'gamma five six')];
+    expect(dedupeHits(input)).toEqual(input);
   });
 });
 

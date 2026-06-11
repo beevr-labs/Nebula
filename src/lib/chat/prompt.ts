@@ -36,6 +36,12 @@ export const SYSTEM_PROMPT_REASON = `You are Nebula's local knowledge assistant.
 // Friendly, human no-results line (only used when retrieval returns zero chunks).
 export const NO_RESULTS_MESSAGE = "I couldn't find anything about that in your notes.";
 
+// Last-resort line when retrieval DID find relevant notes but the model produced an empty answer
+// even after a retry (a degenerate generation). Points the user at the cited notes + a rephrase,
+// instead of showing a blank answer.
+export const EMPTY_ANSWER_MESSAGE =
+  "I found relevant notes but couldn't compose an answer this time — see the sources below, or try rephrasing the question.";
+
 export type PromptResult =
   | { kind: 'grounded'; system: string; user: string; contextOrder: string[] }
   | { kind: 'no_results'; message: string };
@@ -50,6 +56,55 @@ function chunkBlock(hit: SearchHit, n: number): string {
   const loc =
     hit.page === undefined ? `source: ${hit.docId}` : `source: ${hit.docId}, p.${hit.page}`;
   return `[#${n}] (${loc})\n${hit.text}`;
+}
+
+// Two chunks counting as "the same content" at/above this word-set Jaccard. 0.65 = ~two-thirds of
+// the combined vocabulary shared. Template-repetitive lines that differ only in a few entities land
+// here ("…tiếp tục dự án Orion. Trao đổi với Linh…" vs "…dự án Atlas. Trao đổi với Hùng…" measures
+// ~0.73), while genuinely different chunks share little more than stopwords (~0.1) and are kept.
+// Set by the live repro: a 90-line standup transcript collapsed generation; its near-clone lines
+// sit at 0.7–0.8, so the threshold must be below that to break the wall.
+const DEDUP_JACCARD = 0.65;
+
+/** Unicode-aware word set of a chunk: lowercased, NFKC, split on non-letter/digit so Vietnamese
+ *  diacritics stay intact (ASCII `\w` would shred "Hôm" into "H"/"m"). 1-char tokens dropped as noise. */
+function wordSet(text: string): Set<string> {
+  return new Set(
+    text
+      .toLowerCase()
+      .normalize('NFKC')
+      .split(/[^\p{L}\p{N}]+/u)
+      .filter((w) => w.length > 1)
+  );
+}
+
+function jaccard(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  let inter = 0;
+  for (const w of a) if (b.has(w)) inter++;
+  return inter / (a.size + b.size - inter);
+}
+
+/**
+ * Drop near-duplicate chunks BEFORE the context is assembled. Retrieval over a repetitive note (a
+ * 90-line standup transcript, a tabular CSV) returns dozens of near-identical chunks; left alone
+ * they fill the whole token budget with the same sentence repeated, crowd out the diverse notes
+ * that actually answer the question, AND make small models emit an EMPTY answer (reproduced live on
+ * both 1.5B and 3B — a wall of repetition collapses generation). Walks hits in score order, keeping
+ * each only if it isn't ≥DEDUP_JACCARD similar to one already kept, so the highest-scoring
+ * representative of each duplicate cluster survives and the budget fills with VARIED context.
+ * Pure/deterministic; preserves input order. O(n·k) over kept set k — n is the retrieved fan-out.
+ */
+export function dedupeHits(hits: SearchHit[], threshold = DEDUP_JACCARD): SearchHit[] {
+  const kept: SearchHit[] = [];
+  const keptSets: Set<string>[] = [];
+  for (const hit of hits) {
+    const ws = wordSet(hit.text);
+    if (keptSets.some((s) => jaccard(ws, s) >= threshold)) continue;
+    kept.push(hit);
+    keptSets.push(ws);
+  }
+  return kept;
 }
 
 /**
@@ -76,12 +131,30 @@ export function assemblePrompt(
   const count = opts.countTokens ?? approxTokenCount;
   const budget = opts.maxContextTokens ?? Infinity;
 
+  // Collapse near-duplicate chunks first so a repetitive note can't fill the budget with the same
+  // line over and over (which both starves diverse context and empties small-model output).
+  const deduped = dedupeHits(hits);
+
   // hits are in descending score; include greedily until the budget is hit.
   const included: SearchHit[] = [];
   let used = 0;
-  for (const hit of hits) {
+  for (const hit of deduped) {
     const cost = count(chunkBlock(hit, included.length + 1));
-    if (included.length > 0 && used + cost > budget) break; // keep at least one
+    if (included.length > 0 && used + cost > budget) break;
+    if (included.length === 0 && cost > budget) {
+      // A single lead chunk bigger than the whole budget — a long note read whole (reason mode) or
+      // an unsplit note. The old "keep at least one" included it verbatim, overflowing the model's
+      // context window (WebLLM throws → blank answer). TRUNCATE it to fit instead so the highest-
+      // scoring source still grounds the answer. Text only — chunkId/citation mapping is unchanged.
+      const overhead = count(chunkBlock({ ...hit, text: '' }, 1));
+      const room = Math.max(1, budget - overhead);
+      const words = hit.text.split(/\s+/);
+      const text = words.slice(0, room).join(' ') + (words.length > room ? ' …' : '');
+      const truncated = { ...hit, text };
+      included.push(truncated);
+      used += count(chunkBlock(truncated, 1));
+      continue;
+    }
     included.push(hit);
     used += cost;
   }
