@@ -190,51 +190,40 @@ export async function seedDocGraph(
  */
 export async function ingestVaultGraphFast(
   store: GraphIngestStore,
-  docs: { docId: string; text: string }[],
-  onProgress?: (done: number, total: number) => void | Promise<void>
+  docs: { docId: string; text: string }[]
 ): Promise<Map<string, IngestGraphResult>> {
   const results = new Map<string, IngestGraphResult>();
-  // Refresh cadence: each note is microseconds of compute but ~6 serialized store writes, so a
-  // 100-note bulk import is ~hundreds of DB ops — fast, but not instant. Tick the caller every few
-  // notes so the Entities pane TRICKLES IN during a big import instead of staying empty until the
-  // whole batch persists (FOUND via the 100-large-note stress test).
-  const TICK_EVERY = 8;
-  let done = 0;
-  let sinceTick = 0;
+  // NOTE: no progressive "refresh the pane every N notes" callback here, deliberately. entityData()
+  // is three full-graph table scans; interleaving it with this pass's writes both CONTENDS with the
+  // SurrealDB-WASM single-writer queue and gets costlier as the graph grows — a 40-note stress
+  // import dropped from ~seconds to ~13 notes in 75s when refreshed mid-pass. The pass is fast on
+  // its own (uncontended); callers refresh ONCE when it returns. Same single-reader discipline the
+  // background index queue uses (drainIndexQueue: "refresh once, after the queue drains").
   for (const d of docs) {
     const h = graphHash(d.text);
     const stored = await store.getGraphHash(d.docId);
     if (stored === h || stored === HEURISTIC_HASH_PREFIX + h) {
       results.set(d.docId, { status: 'skipped' });
-    } else {
-      try {
-        const g = resolveExtraction(extractHeuristic(d.text));
-        if (g.entities.length === 0) {
-          results.set(d.docId, { status: 'no_graph' });
-        } else {
-          const entityCount = await persistResolvedGraph(
-            store,
-            d.docId,
-            d.text,
-            g,
-            HEURISTIC_HASH_PREFIX + h
-          );
-          results.set(d.docId, { status: 'ingested', entityCount });
-          sinceTick++;
-        }
-      } catch {
-        results.set(d.docId, { status: 'no_graph' }); // best-effort per note, like every graph path
-      }
+      continue;
     }
-    done++;
-    if (onProgress && sinceTick >= TICK_EVERY) {
-      sinceTick = 0;
-      await onProgress(done, docs.length);
+    try {
+      const g = resolveExtraction(extractHeuristic(d.text));
+      if (g.entities.length === 0) {
+        results.set(d.docId, { status: 'no_graph' });
+        continue;
+      }
+      const entityCount = await persistResolvedGraph(
+        store,
+        d.docId,
+        d.text,
+        g,
+        HEURISTIC_HASH_PREFIX + h
+      );
+      results.set(d.docId, { status: 'ingested', entityCount });
+    } catch {
+      results.set(d.docId, { status: 'no_graph' }); // best-effort per note, like every graph path
     }
   }
-  // Final settle for the un-ticked tail — skipped when the last boundary tick already flushed
-  // everything (sinceTick === 0), so it never double-fires.
-  if (onProgress && sinceTick > 0) await onProgress(done, docs.length);
   return results;
 }
 
