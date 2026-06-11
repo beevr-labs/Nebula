@@ -47,28 +47,43 @@ async function hasWebGPU(): Promise<boolean> {
  */
 export function getEmbedder(): Promise<FeatureExtractionPipeline> {
   return (extractorPromise ??= (async () => {
-    if (await hasWebGPU()) {
-      try {
-        const ext = (await pipeline('feature-extraction', EMBEDDING_MODEL, {
-          device: 'webgpu',
-          dtype: 'fp16'
-        })) as unknown as FeatureExtractionPipeline;
-        embedInfo.device = 'webgpu';
-        return ext;
-      } catch (e) {
-        console.warn('Nebula: WebGPU embedder failed to load, falling back to CPU/q8:', e);
+    try {
+      if (await hasWebGPU()) {
+        try {
+          const ext = (await pipeline('feature-extraction', EMBEDDING_MODEL, {
+            device: 'webgpu',
+            dtype: 'fp16'
+          })) as unknown as FeatureExtractionPipeline;
+          embedInfo.device = 'webgpu';
+          return ext;
+        } catch (e) {
+          console.warn('Nebula: WebGPU embedder failed to load, falling back to CPU/q8:', e);
+        }
       }
+      const ext = (await pipeline('feature-extraction', EMBEDDING_MODEL, {
+        dtype: 'q8'
+      })) as unknown as FeatureExtractionPipeline;
+      embedInfo.device = 'cpu';
+      return ext;
+    } catch (e) {
+      // A FAILED load must NOT stay cached: a one-time blip (network/quota/WebGPU) would otherwise
+      // wedge ALL indexing until a page reload — every later save would "fail to index" even after
+      // the cause cleared. Drop the memoized slot so the next getEmbedder() call retries cleanly.
+      extractorPromise = null;
+      throw e;
     }
-    const ext = (await pipeline('feature-extraction', EMBEDDING_MODEL, {
-      dtype: 'q8'
-    })) as unknown as FeatureExtractionPipeline;
-    embedInfo.device = 'cpu';
-    return ext;
   })());
 }
 
 export function getTokenizer(): Promise<PreTrainedTokenizer> {
-  return (tokenizerPromise ??= AutoTokenizer.from_pretrained(EMBEDDING_MODEL));
+  return (tokenizerPromise ??= (async () => {
+    try {
+      return await AutoTokenizer.from_pretrained(EMBEDDING_MODEL);
+    } catch (e) {
+      tokenizerPromise = null; // same self-heal: a failed tokenizer load shouldn't poison the cache
+      throw e;
+    }
+  })());
 }
 
 /** Embed a single string → 384-dim mean-pooled, normalized vector (MiniLM-L12). */
