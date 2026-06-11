@@ -491,6 +491,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
   let preloading = $state(false); // a background model preload is in flight
   let loadPhase = $state<'' | 'downloading' | 'loading' | 'compiling'>(''); // model-load stage
   let loadPct = $state(0); // 0–100 download/load progress for the gpu-bar bar
+  let modelLoading = $state(false); // a chat-model load is in flight → locks the picker (no concurrent loads)
 
   // Ingestion UI.
   let importMsg = $state('');
@@ -920,6 +921,8 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
   // Multi-format ingestion (FR-ING-001/012): drop/pick PDF/CSV/TXT/MD → Markdown Proxy Note.
   async function ingestFiles(list: FileList | null) {
     if (!pipe || !ready || !list || list.length === 0) return;
+    let queued = 0; // files that parsed OK and were handed to the background index queue
+    let firstDoc = ''; // open ONE tab (the first import) at the end, not one per file
     for (const file of Array.from(list)) {
       importMsg = `ingesting ${file.name}…`;
       try {
@@ -963,9 +966,11 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
           now: today(),
           taggableLater: !!sourcePath
         });
-        await pipe.ingest(docId, body);
-        // Extract + persist this document's entity graph (best-effort; needs a loaded model).
-        const entCount = await pipe.indexGraph(docId, body).catch(() => 0);
+        const isReimport = vault.some((n) => n.docId === docId);
+        // INSTANT (the Obsidian model, ADR-024): the file joins the vault NOW — visible, linkable,
+        // exportable — exactly like a single-note save. The heavy work (embedding + LLM entity graph)
+        // runs in the BACKGROUND queue, so dropping 10 large files no longer blocks the import loop
+        // file-by-file on each one's embed + graph extraction.
         await pipe.putNote({
           docId,
           title: stem,
@@ -994,16 +999,22 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
           ];
           await putSource(sourcePath, bytes); // persist the original so Export survives a refresh
         }
-        importMsg = `✓ ingested ${docId} (${res.type})${entCount > 0 ? ` · ${entCount} entities` : ''}`;
-        showSource(docId);
+        // Queue PASS 1 (embed → searchable) + PASS 2 (entity graph, decoupled). On a re-import, pass
+        // the old docId so the queue drops the stale chunks/graph before re-embedding.
+        enqueueIndex(docId, body, isReimport ? docId : undefined);
+        queued++;
+        if (!firstDoc) firstDoc = docId;
+        importMsg = `✓ added ${stem}`;
       } catch (e) {
         importMsg = `error on ${file.name}: ${e instanceof Error ? e.message : String(e)}`;
       }
     }
-    // Refresh the Entities pane ONCE after the whole batch — never per-file. A fire-and-forget
-    // refresh inside the loop runs a READ that overlaps the next file's WRITES, which wedges the
-    // IndexedDB engine ("Can not open transaction") on large bulk ingests (FOUND via stress test).
-    await refreshEntities();
+    // Indexing now runs in the BACKGROUND queue (the header shows "indexing…" → "building graph…" →
+    // "indexed"), and that queue calls refreshEntities() once when it drains — so we DON'T refresh
+    // here: a refresh inside/after this loop runs a READ that can overlap the queue's WRITES and wedge
+    // the IndexedDB engine ("Can not open transaction") on large bulk ingests (FOUND via stress test).
+    if (firstDoc) showSource(firstDoc);
+    if (queued > 1) importMsg = `✓ added ${queued} files — indexing in the background`;
     if (fileInput) fileInput.value = '';
   }
 
@@ -1066,6 +1077,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     if (indexRunning || !pipe) return;
     indexRunning = true;
     let failed = 0; // notes whose embed threw (surfaced instead of silently swallowed)
+    let firstErr = ''; // first failure's message → tell "embed model didn't load" apart from a bad note
     let doneCount = 0; // notes whose chunks landed this drain (for the completion pill)
     let lastName = ''; // last note's short name (the common single-note case)
     // PASS 1 — embed + persist chunks. Makes the note searchable; holds the "indexing" pill.
@@ -1083,18 +1095,27 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
         graphJobs.push(job); // chunks exist → eligible for graph extraction in pass 2
         lastName = shortName(job.docId);
         doneCount++;
-      } catch {
+      } catch (e) {
         // A failed index shouldn't wedge the queue; the note stays in the vault, just unindexed —
-        // but DON'T swallow it silently: count it so the header can surface "N failed to index".
+        // but DON'T swallow it silently: count it + keep the reason so the header can say WHY.
         failed++;
+        if (!firstErr) firstErr = e instanceof Error ? e.message : String(e);
       }
       indexJobs.shift();
       bgPending = indexJobs.length;
       bgProgress = '';
     }
     // The note(s) are searchable now — confirm immediately, don't wait on graph extraction.
-    if (failed > 0) flashIndexed(`⚠ ${failed} note${failed > 1 ? 's' : ''} failed to index`);
-    else if (doneCount > 0)
+    if (failed > 0) {
+      // Usually it's not a bad note — it's the embedding model failing to load (offline, storage
+      // quota, or no WebGPU). Name THAT so a user doesn't think their note is corrupt.
+      const modelIssue = /model|pipeline|onnx|fetch|network|load|download|gpu|wasm/i.test(firstErr);
+      flashIndexed(
+        modelIssue
+          ? "⚠ couldn't load the embedding model — check connection, then save again to retry"
+          : `⚠ ${failed} note${failed > 1 ? 's' : ''} failed to index`
+      );
+    } else if (doneCount > 0)
       flashIndexed(`indexed ${doneCount === 1 ? truncate(lastName, 22) : `${doneCount} notes`}`);
 
     // PASS 2 — entity graph (LLM extraction): the slow step, run WITHOUT blocking the indexed state.
@@ -1569,69 +1590,91 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
    * the big models, cache-aware status, graceful failure. Returns true if it's loaded (or already
    * current), false if declined/failed. Shared by Ask + preload.
    */
+  // Serialize chat-model loads so two never run at once: a second loadModel() on the same WebLLM
+  // engine while one is in flight corrupts the cached weights (the "pick a model, then it never loads
+  // / Ask returns nothing" bug). A load in flight DEDUPES same-model callers — Ask, build-graph, and
+  // the gate all await the one promise — and REFUSES a request for a DIFFERENT model until it settles.
+  let modelLoadPromise: Promise<boolean> | null = null;
+  let modelLoadingId = '';
+
   async function ensureModelLoaded(id: string): Promise<boolean> {
     if (!pipe) return false;
     if (loadedModel === id) return true;
-    const cached = await pipe.provider.isCached(id).catch(() => false);
-    // The large-model confirm is about a big ONE-TIME DOWNLOAD — so only ask when there's actually a
-    // download. A cached model loads instantly with no transfer, so never re-prompt for it (that's why
-    // the dialog kept reappearing on every reload: ackedModels resets in memory, and the check ignored
-    // the cache). Picking a large model in the gate still counts as the ack for the first download.
-    if (!cached && needsOomAck(id) && !ackedModels.has(id)) {
-      const m = modelById(id);
-      const ok = confirm(
-        `${m?.label} is a large model — about ${formatSize(m?.sizeMB ?? 0)} to download once ` +
-          `(then cached) and more VRAM to run.\n\nDownload and load it now?`
-      );
-      if (!ok) {
+    // Already loading? Join the SAME model's in-flight promise; refuse a DIFFERENT model (no concurrent
+    // loads — the UI also locks the picker, this is the synchronous backstop for direct callers).
+    if (modelLoadPromise) return modelLoadingId === id ? modelLoadPromise : false;
+    const conn = pipe; // capture non-null for the nested closure (narrowing doesn't cross it)
+    modelLoadingId = id;
+    modelLoading = true;
+    modelLoadPromise = (async (): Promise<boolean> => {
+      const cached = await conn.provider.isCached(id).catch(() => false);
+      // The large-model confirm is about a big ONE-TIME DOWNLOAD — so only ask when there's actually a
+      // download. A cached model loads instantly with no transfer, so never re-prompt for it (that's why
+      // the dialog kept reappearing on every reload: ackedModels resets in memory, and the check ignored
+      // the cache). Picking a large model in the gate still counts as the ack for the first download.
+      if (!cached && needsOomAck(id) && !ackedModels.has(id)) {
+        const m = modelById(id);
+        const ok = confirm(
+          `${m?.label} is a large model — about ${formatSize(m?.sizeMB ?? 0)} to download once ` +
+            `(then cached) and more VRAM to run.\n\nDownload and load it now?`
+        );
+        if (!ok) {
+          modelId = loadedModel || DEFAULT_MODEL_ID;
+          status = 'ready';
+          return false;
+        }
+        ackedModels = new Set(ackedModels).add(id);
+      }
+      modelCached = cached;
+      loadPhase = modelCached ? 'loading' : 'downloading';
+      loadPct = 0;
+      status = `${modelCached ? 'loading cached model' : 'first run — downloading model once'}…`;
+      try {
+        await conn.provider.loadModel(id, (p) => {
+          loadPct = Math.round(p * 100);
+          // WebLLM reports 100% download well before the GPU finishes compiling shaders — name that
+          // last stage so a few frozen seconds read as "compiling", not "stuck".
+          loadPhase = loadPct >= 100 ? 'compiling' : modelCached ? 'loading' : 'downloading';
+          status = `${loadPhase} model ${loadPct}%`;
+        });
+      } catch (err) {
+        loadPhase = '';
+        const m = modelById(id);
+        const msg = err instanceof Error ? err.message : String(err);
         modelId = loadedModel || DEFAULT_MODEL_ID;
-        status = 'ready';
+        // Classify the failure so the guidance is actionable. Blaming EVERY failure on model size
+        // ("pick a smaller model") is wrong for a network hiccup or a browser-STORAGE limit (e.g.
+        // "Failed to read large IndexedDB value" in a private window / quota-capped browser), where the
+        // right move is "retry" or "free space", not "downgrade the model".
+        const isStorage = /indexeddb|quota|storage|read large|disk|no ?space/i.test(msg);
+        const isDownload =
+          /cache|network|fetch|failed to execute 'add'|http|50\d|429|timeout|load/i.test(msg);
+        if (isStorage) {
+          status =
+            `⚠ ${m?.label ?? 'model'} couldn't be cached — the browser's storage rejected the weights ` +
+            `(often a private window or a low storage quota). Use a normal window, free disk space, then retry. [${msg}]`;
+        } else if (isDownload) {
+          status =
+            `⚠ ${m?.label ?? 'model'} download didn't finish — the model host (HuggingFace) may be ` +
+            `busy/rate-limiting. Wait a moment and retry; already-downloaded parts resume. [${msg}]`;
+        } else {
+          status = `⚠ ${m?.label ?? 'model'} couldn't load on this GPU. Try again, or pick a smaller model if it persists. [${msg}]`;
+        }
         return false;
       }
-      ackedModels = new Set(ackedModels).add(id);
-    }
-    modelCached = cached;
-    loadPhase = modelCached ? 'loading' : 'downloading';
-    loadPct = 0;
-    status = `${modelCached ? 'loading cached model' : 'first run — downloading model once'}…`;
-    try {
-      await pipe.provider.loadModel(id, (p) => {
-        loadPct = Math.round(p * 100);
-        // WebLLM reports 100% download well before the GPU finishes compiling shaders — name that
-        // last stage so a few frozen seconds read as "compiling", not "stuck".
-        loadPhase = loadPct >= 100 ? 'compiling' : modelCached ? 'loading' : 'downloading';
-        status = `${loadPhase} model ${loadPct}%`;
-      });
-    } catch (err) {
       loadPhase = '';
-      const m = modelById(id);
-      const msg = err instanceof Error ? err.message : String(err);
-      modelId = loadedModel || DEFAULT_MODEL_ID;
-      // Classify the failure so the guidance is actionable. Blaming EVERY failure on model size
-      // ("pick a smaller model") is wrong for a network hiccup or a browser-STORAGE limit (e.g.
-      // "Failed to read large IndexedDB value" in a private window / quota-capped browser), where the
-      // right move is "retry" or "free space", not "downgrade the model".
-      const isStorage = /indexeddb|quota|storage|read large|disk|no ?space/i.test(msg);
-      const isDownload =
-        /cache|network|fetch|failed to execute 'add'|http|50\d|429|timeout|load/i.test(msg);
-      if (isStorage) {
-        status =
-          `⚠ ${m?.label ?? 'model'} couldn't be cached — the browser's storage rejected the weights ` +
-          `(often a private window or a low storage quota). Use a normal window, free disk space, then retry. [${msg}]`;
-      } else if (isDownload) {
-        status =
-          `⚠ ${m?.label ?? 'model'} download didn't finish — the model host (HuggingFace) may be ` +
-          `busy/rate-limiting. Wait a moment and retry; already-downloaded parts resume. [${msg}]`;
-      } else {
-        status = `⚠ ${m?.label ?? 'model'} couldn't load on this GPU. Try again, or pick a smaller model if it persists. [${msg}]`;
-      }
-      return false;
+      loadedModel = id;
+      modelCached = true;
+      cachedModels = new Set(cachedModels).add(id); // it's now on disk → keep the gate's badge current
+      return true;
+    })();
+    try {
+      return await modelLoadPromise;
+    } finally {
+      modelLoadPromise = null;
+      modelLoadingId = '';
+      modelLoading = false;
     }
-    loadPhase = '';
-    loadedModel = id;
-    modelCached = true;
-    cachedModels = new Set(cachedModels).add(id); // it's now on disk → keep the gate's badge current
-    return true;
   }
 
   /** Preload the selected model now (so the first Ask is instant). Non-blocking; safe to ignore. */
@@ -1686,6 +1729,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     uiPrefs.setOnboarded(true);
   }
   function chooseModel(id: string) {
+    if (modelLoading) return; // a load is already in flight — can't switch until it finishes
     modelId = id;
     uiPrefs.setModelPref(id);
     // Picking a large model in the gate IS the OOM acknowledgment — don't re-confirm at load time.
@@ -1699,6 +1743,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     else closeModelGate(); // no WebGPU → no chat model to warm; semantic search still works
   }
   function reopenModelGate() {
+    if (modelLoading) return; // don't let the picker open mid-load — you'd only be able to wait anyway
     modelGate = true;
     void refreshModelCacheStatus(); // so the gate shows which models are already on disk
   }
@@ -2615,13 +2660,15 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     <div class="tb-right">
       <button
         class="pill model-pill nb-hov nb-press"
+        class:loading={modelLoading}
         onclick={reopenModelGate}
-        title="On-device chat model"
+        disabled={modelLoading}
+        title={modelLoading
+          ? 'Model is loading — please wait until it finishes before switching'
+          : 'On-device chat model'}
       >
-        <span class="dot ok"></span>{modelById(modelId)?.label ?? 'Model'}{@render ic(
-          'chevdown',
-          12
-        )}
+        <span class="dot {modelLoading ? 'busy' : 'ok'}"></span>{modelById(modelId)?.label ??
+          'Model'}{@render ic('chevdown', 12)}
       </button>
       {#if bgPending > 0}
         <span class="pill busy-pill"
@@ -3735,7 +3782,10 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
         </div>
         {#if gpu?.ok}
           {@const rec = recommendModel(true)}
-          {#if rec}<button class="gate-auto nb-press" onclick={chooseAutoModel}
+          {#if rec}<button
+              class="gate-auto nb-press"
+              onclick={chooseAutoModel}
+              disabled={modelLoading}
               ><span>★ Auto — {rec.label}</span><small class="dim"
                 >recommended for your GPU · {formatSize(rec.sizeMB)}</small
               ></button
@@ -3747,7 +3797,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
                 <button
                   class="gate-pick nb-hov"
                   onclick={() => chooseModel(m.id)}
-                  disabled={deletingModel === m.id}
+                  disabled={modelLoading || deletingModel === m.id}
                 >
                   <span class="gate-nm"
                     >{m.label}{#if m.multilingual}<span class="mini-badge">multilingual</span
@@ -3937,6 +3987,10 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
   .model-pill {
     cursor: pointer;
   }
+  .model-pill:disabled {
+    cursor: progress;
+    opacity: 0.7;
+  }
   .dot {
     width: 7px;
     height: 7px;
@@ -3946,6 +4000,19 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
   }
   .dot.ok {
     background: var(--ok);
+  }
+  .dot.busy {
+    background: var(--warn);
+    animation: dotpulse 1s ease-in-out infinite;
+  }
+  @keyframes dotpulse {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.3;
+    }
   }
   .ok-pill {
     background: var(--ok-soft);
