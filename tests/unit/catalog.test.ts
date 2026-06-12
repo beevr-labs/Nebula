@@ -3,10 +3,12 @@ import {
   CHAT_MODELS,
   BIG_MODEL_MB,
   RECOMMENDED_MODEL_ID,
+  RECOMMENDED_LITE_MODEL_ID,
   modelById,
   formatSize,
   needsOomAck,
-  recommendModel
+  recommendModel,
+  isHighEndForChat
 } from '../../src/lib/inference/catalog';
 
 // FR-CAP-003/004. The curated chat-model picker + the OOM-risk gate for large models.
@@ -39,14 +41,34 @@ describe('formatSize', () => {
 });
 
 describe('recommendModel', () => {
-  it('recommends the multilingual 3B with WebGPU, nothing without', () => {
-    const r = recommendModel(true);
+  it('no WebGPU → null (chat unsupported; semantic search still works)', () => {
+    expect(recommendModel(false)).toBeNull();
+    expect(recommendModel(false, { deviceMemoryGB: 32 })).toBeNull();
+  });
+
+  it('capable machine (≥8 GB RAM) → the newest multilingual 8B', () => {
+    const r = recommendModel(true, { deviceMemoryGB: 16, maxBufferBytes: 2_000_000_000 });
     expect(r?.id).toBe(RECOMMENDED_MODEL_ID);
     expect(r?.multilingual).toBe(true);
-    expect(recommendModel(false)).toBeNull();
+    expect(r?.params).toBe('8B');
   });
-  it('recommends a model that loads reliably (below the experimental ack threshold)', () => {
-    expect(needsOomAck(RECOMMENDED_MODEL_ID)).toBe(false); // a 3B must not be gated as "too big"
+
+  it('weaker / unknown machine → the lighter multilingual 3B fallback (ack-free, modest download)', () => {
+    expect(recommendModel(true, { deviceMemoryGB: 4 })?.id).toBe(RECOMMENDED_LITE_MODEL_ID);
+    expect(recommendModel(true)?.id).toBe(RECOMMENDED_LITE_MODEL_ID); // no hints → conservative
+    expect(modelById(RECOMMENDED_LITE_MODEL_ID)?.multilingual).toBe(true);
+    expect(needsOomAck(RECOMMENDED_LITE_MODEL_ID)).toBe(false); // the 3B fallback loads without an ack
+  });
+
+  it('a very weak GPU (tiny max buffer) vetoes the heavy default even with RAM', () => {
+    expect(isHighEndForChat({ deviceMemoryGB: 32, maxBufferBytes: 128_000_000 })).toBe(false);
+    expect(isHighEndForChat({ deviceMemoryGB: 8 })).toBe(true);
+    expect(isHighEndForChat({ deviceMemoryGB: 4 })).toBe(false);
+  });
+
+  it('both recommended ids are real, multilingual catalog entries', () => {
+    expect(modelById(RECOMMENDED_MODEL_ID)?.multilingual).toBe(true);
+    expect(modelById(RECOMMENDED_LITE_MODEL_ID)?.multilingual).toBe(true);
   });
 });
 

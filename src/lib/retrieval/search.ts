@@ -93,13 +93,30 @@ export function rrfFuse(rankings: string[][], k = 60): Map<string, number> {
   return scores;
 }
 
-/** Lightweight lexical (BM25-stand-in) score: count case-insensitive exact SUBSTRING term hits. Kept
+/**
+ * Diacritic-fold + lowercase for ACCENT-INSENSITIVE lexical matching. Vietnamese text is routinely
+ * written both with and without tone/vowel marks (legacy exports, filenames, telegraphic notes), so a
+ * query "Hoả Phong" must still match a note that stored "Hoa Phong" and vice versa. NFD splits a
+ * precomposed letter into base + combining marks (U+0300–U+036F), which we strip; "đ/Đ" are separate
+ * letters (not decomposed) so they're mapped explicitly. ASCII text is unaffected, so English exact-
+ * term matching (IDs, names) is preserved. Used by the lexical recall channel + precision re-rank.
+ */
+export function foldDiacritics(text: string): string {
+  return text
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .replace(/đ/g, 'd')
+    .replace(/Đ/g, 'D')
+    .toLowerCase();
+}
+
+/** Lightweight lexical (BM25-stand-in) score: count accent-insensitive exact SUBSTRING term hits. Kept
  *  for `hybridSearch`, whose terms are exact IDs/names/symbols where substring matching is wanted. */
 function lexicalScore(text: string, terms: string[]): number {
-  const hay = text.toLowerCase();
+  const hay = foldDiacritics(text);
   let score = 0;
   for (const term of terms) {
-    const t = term.toLowerCase();
+    const t = foldDiacritics(term);
     if (t.length === 0) continue;
     let from = 0;
     let idx = hay.indexOf(t, from);
@@ -122,13 +139,12 @@ function lexicalScore(text: string, terms: string[]): number {
  */
 export function wordTermScore(text: string, terms: string[]): number {
   const words = new Set(
-    text
-      .toLowerCase()
+    foldDiacritics(text)
       .split(/[^\p{L}\p{N}]+/u)
       .filter(Boolean)
   );
   let score = 0;
-  for (const t of terms) if (words.has(t)) score += 1;
+  for (const t of terms) if (words.has(foldDiacritics(t))) score += 1;
   return score;
 }
 
@@ -314,16 +330,18 @@ export function entityAnchorDocs(
   query: string,
   entities: { name: string; docIds: string[] }[]
 ): Set<string> {
-  const qlc = query.toLowerCase();
-  const qWords = new Set(queryTerms(query));
+  // Diacritic-fold both sides so a "Hoả Phong" query still anchors to a "Hoa Phong" entity (the same
+  // accent-insensitivity the lexical channel uses — otherwise the entity-denoise step drops the
+  // lexical rescue of a no-diacritic note). ASCII names are unaffected.
+  const qlc = foldDiacritics(query);
+  const qWords = new Set(queryTerms(query).map(foldDiacritics));
   // A name-word only anchors if it's DISTINCTIVE — present in exactly one entity's name. This stops a
   // generic shared token like "project" (in "Project Harmony", "Project Falcon", "Project Orion")
   // from cross-anchoring every deal; "harmony"/"falcon" (unique to one) still anchor precisely.
   const nameWordFreq = new Map<string, number>();
   for (const e of entities) {
     for (const w of new Set(
-      e.name
-        .toLowerCase()
+      foldDiacritics(e.name)
         .split(/[^\p{L}\p{N}]+/u)
         .filter((x) => x.length >= 4)
     )) {
@@ -332,7 +350,7 @@ export function entityAnchorDocs(
   }
   const seedDocs = new Set<string>();
   for (const e of entities) {
-    const nameLc = e.name.toLowerCase();
+    const nameLc = foldDiacritics(e.name);
     if (nameLc.length < 3) continue;
     const named =
       qlc.includes(nameLc) ||

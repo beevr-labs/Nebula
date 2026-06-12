@@ -10,7 +10,7 @@ import type { SearchHit } from '$lib/inference/provider';
 import type { EntityRecord, MentionEdge, RelationEdge } from '$lib/graph/types';
 import type { GraphNeighbor } from '$lib/graph/entity-graph';
 import { fuseGraphRag } from '$lib/retrieval/graphrag';
-import { wordTermScore } from '$lib/retrieval/search';
+import { wordTermScore, foldDiacritics } from '$lib/retrieval/search';
 
 export interface ChunkRecord {
   chunkId: string;
@@ -84,6 +84,30 @@ export class VectorStore {
        DEFINE TABLE IF NOT EXISTS graphmeta SCHEMALESS;`
     );
     this.db = db;
+    await this.backfillTextFold();
+  }
+
+  /**
+   * One-time migration for accent-insensitive lexical recall: chunks written before `textFold` existed
+   * lack it, so the in-DB substring scan can't match them. Fold each from its already-stored `text`
+   * (NO re-embedding, NO touch to the `note` source-of-truth) and write it back. Guarded by a
+   * graphmeta flag so it runs ONCE per store (the field-absent rows are filtered in JS — SurrealDB's
+   * `WHERE textFold = NONE` does NOT match a row that simply lacks the field, only one set to NONE).
+   */
+  private async backfillTextFold(): Promise<void> {
+    const [meta] = await this.q<[{ done?: boolean }[]]>(`SELECT done FROM graphmeta:textfold_v1`);
+    if (meta?.[0]?.done) return;
+    const [rows] = await this.q<
+      [{ chunkId: string; text: string | null; textFold?: string | null }[]]
+    >(`SELECT chunkId, text, textFold FROM chunk`);
+    const todo = (rows ?? []).filter((r) => !r.textFold && r.chunkId);
+    if (todo.length > 0) {
+      await this.q(
+        `FOR $u IN $updates { UPDATE type::thing("chunk", $u.cid) SET textFold = $u.tf; }`,
+        { updates: todo.map((r) => ({ cid: r.chunkId, tf: foldDiacritics(r.text ?? '') })) }
+      );
+    }
+    await this.q(`UPSERT graphmeta:textfold_v1 CONTENT { done: true };`);
   }
 
   private get conn(): Surreal {
@@ -128,14 +152,17 @@ export class VectorStore {
   async upsertChunks(records: ChunkRecord[]): Promise<void> {
     if (records.length === 0) return;
     await this.q(
+      // `textFold` = diacritic-folded text for accent-insensitive lexical recall (lexicalSearch). Stored
+      // at write time so the in-DB substring scan can match "Hoa Phong" for a "Hoả Phong" query.
       `FOR $r IN $records {
-         UPSERT type::thing("chunk", $r.cid) CONTENT { chunkId: $r.cid, docId: $r.docId, text: $r.text, page: $r.page, charStart: $r.cs, charEnd: $r.ce, embedding: $r.emb };
+         UPSERT type::thing("chunk", $r.cid) CONTENT { chunkId: $r.cid, docId: $r.docId, text: $r.text, textFold: $r.tf, page: $r.page, charStart: $r.cs, charEnd: $r.ce, embedding: $r.emb };
        }`,
       {
         records: records.map((r) => ({
           cid: r.chunkId,
           docId: r.docId,
           text: r.text,
+          tf: foldDiacritics(r.text),
           page: r.page ?? null,
           cs: r.charStart,
           ce: r.charEnd,
@@ -178,16 +205,17 @@ export class VectorStore {
       ...new Set(terms.map((t) => t.toLowerCase().trim()).filter((t) => t.length >= 3))
     ].slice(0, 8);
     if (clean.length === 0) return [];
-    // string::contains (NOT the CONTAINS operator — that's array membership) does the substring scan;
-    // the whole-word precision pass (wordTermScore) runs in JS below to drop "end"-inside-"spend".
-    const conds = clean
-      .map((_, i) => `string::contains(string::lowercase(text), $t${i})`)
-      .join(' OR ');
+    // ACCENT-INSENSITIVE scan: match folded query terms against the stored `textFold` (diacritic-folded
+    // at write time), so a "Hoả Phong" query finds a "Hoa Phong" note and vice versa. string::contains
+    // (NOT the CONTAINS operator — that's array membership) does the substring scan; the whole-word
+    // precision pass (wordTermScore, also accent-insensitive) runs in JS below to drop "end"-in-"spend".
+    const folded = clean.map((t) => foldDiacritics(t));
+    const conds = folded.map((_, i) => `string::contains(textFold, $t${i})`).join(' OR ');
     const [rows] = await this.q<[ChunkRow[]]>(
       `SELECT chunkId, docId, text, page, charStart, charEnd,
               vector::similarity::cosine(embedding, $q) AS dist
        FROM chunk WHERE ${conds}`,
-      { q: queryVec, ...Object.fromEntries(clean.map((t, i) => [`t${i}`, t])) }
+      { q: queryVec, ...Object.fromEntries(folded.map((t, i) => [`t${i}`, t])) }
     );
     return (rows ?? [])
       .map((row) => ({ row, words: wordTermScore(row.text, clean) }))

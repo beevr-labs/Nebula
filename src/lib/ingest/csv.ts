@@ -84,3 +84,36 @@ export function csvToMarkdown(text: string, opts: { delimiter?: string } = {}): 
   const body = rows.slice(1).map((r) => line(fit(r)));
   return [line(header), line(sep), ...body].join('\n');
 }
+
+/** Humanize a column header for retrieval: split snake_case / kebab-case AND camelCase boundaries into
+ *  words ("DoanhThu_trieu" → "Doanh Thu trieu"), so a natural-language query term ("doanh thu") matches
+ *  it as whole words. Unicode-aware (handles Vietnamese uppercase). Pure. */
+function humanizeHeader(h: string): string {
+  return h
+    .replace(/[_-]+/g, ' ')
+    .replace(/([\p{Ll}\p{N}])(\p{Lu})/gu, '$1 $2')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * A RETRIEVAL-friendly rendering of a CSV: the Markdown table (human-readable) PLUS one self-describing
+ * line per data row pairing each column header with its value ("Doanh Thu: 1620 · San Pham: Thien Loc A").
+ * A raw table row ("| Q4 | Thien Loc A | 1620 |") loses the column context once chunked and scores poorly
+ * on both vector AND whole-word lexical retrieval; the linearized rows carry the header with every value,
+ * so a question like "doanh thu Thiên Lộc quý 4" actually retrieves the right row. Pure & deterministic.
+ */
+export function csvLinearize(text: string, opts: { delimiter?: string } = {}): string {
+  const table = csvToMarkdown(text, opts);
+  const rows = parseCsv(text, opts.delimiter);
+  if (rows.length < 2) return table;
+  const headers = rows[0].map(humanizeHeader);
+  const lines: string[] = [];
+  for (const r of rows.slice(1)) {
+    const pairs = headers
+      .map((h, i) => (h && (r[i] ?? '').trim() ? `${h}: ${escapeCell(r[i])}` : ''))
+      .filter(Boolean);
+    if (pairs.length) lines.push(`- ${pairs.join(' · ')}`);
+  }
+  return lines.length ? `${table}\n\n## Dữ liệu theo dòng\n\n${lines.join('\n')}` : table;
+}

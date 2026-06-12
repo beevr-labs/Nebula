@@ -28,14 +28,15 @@
   import { resolveCitationTarget, buildHighlightSegments, answerUsage } from '$lib/chat/citation';
   import { exportVaultZip } from '$lib/vault/export';
   import { intake } from '$lib/ingest/intake';
-  import { csvToMarkdown } from '$lib/ingest/csv';
+  import { csvLinearize } from '$lib/ingest/csv';
   import { buildProxyNote, proxyNotePath } from '$lib/ingest/proxy';
   import {
     CHAT_MODELS,
     formatSize,
     needsOomAck,
     modelById,
-    recommendModel
+    recommendModel,
+    type HardwareHint
   } from '$lib/inference/catalog';
   import { createNote, updateNote, renameNote, moveNotePath } from '$lib/vault/note-crud';
   import { serializeNote } from '$lib/vault/note';
@@ -495,6 +496,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
   let modelCached = $state(false); // weights already on disk → fast load, no download (#4)
   let ackedModels = $state(new Set<string>()); // large models the user already OK'd (FR-CAP-003)
   let gpu = $state<{ ok: boolean; vendor: string; arch: string } | null>(null);
+  let hwHint = $state<HardwareHint>({}); // coarse hardware signals → drives the model recommendation
   let preloading = $state(false); // a background model preload is in flight
   let loadPhase = $state<'' | 'downloading' | 'loading' | 'compiling'>(''); // model-load stage
   let loadPct = $state(0); // 0–100 download/load progress for the gpu-bar bar
@@ -729,6 +731,12 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
           vendor: adapter.info?.vendor || '',
           arch: adapter.info?.architecture || ''
         };
+        // Coarse hardware signals for the model recommendation (capable machine → newest 8 B, else 3 B).
+        // No VRAM API exists; deviceMemory + the GPU's max buffer size are the best a browser exposes.
+        hwHint = {
+          deviceMemoryGB: (navigator as Navigator & { deviceMemory?: number }).deviceMemory,
+          maxBufferBytes: adapter.limits?.maxBufferSize
+        };
       }
     } catch {
       /* no WebGPU → chat unsupported; semantic search still works (FR-CAP-002) */
@@ -737,7 +745,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     // extraction than the tiny 1B) when WebGPU is present. Auto-preload only fires if it's already
     // cached, so this never triggers a surprise multi-GB download — the first Ask/build does.
     {
-      const rec = recommendModel(!!gpu?.ok);
+      const rec = recommendModel(!!gpu?.ok, hwHint);
       if (rec) modelId = rec.id;
     }
     // Restore UI prefs + raise the startup model gate (FR-MDL-005). A saved pick overrides the GPU
@@ -973,7 +981,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
           }
           sourcePath = `sources/${file.name}`;
         } else if (res.type === 'csv') {
-          body = csvToMarkdown(res.text ?? '');
+          body = csvLinearize(res.text ?? '');
           sourcePath = `sources/${file.name}`;
         } else {
           body = res.text ?? '';
@@ -1765,7 +1773,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
 
   /** Switch to the recommended model for this GPU and warm it up (load + auto-build the graph). */
   async function useRecommended() {
-    const rec = recommendModel(!!gpu?.ok);
+    const rec = recommendModel(!!gpu?.ok, hwHint);
     if (!rec) return;
     modelId = rec.id;
     await warmStartup();
@@ -1812,7 +1820,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     startBackgroundLoad();
   }
   function chooseAutoModel() {
-    const rec = recommendModel(!!gpu?.ok);
+    const rec = recommendModel(!!gpu?.ok, hwHint);
     if (rec) chooseModel(rec.id);
     else closeModelGate(); // no WebGPU → no chat model to warm; semantic search still works
   }
@@ -2163,13 +2171,16 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
       status = 'generating…';
       const res = await pipe.provider.generate(
         // Reason mode elaborates over full notes, so give it more room than the terse grounded answer.
+        // Budgets are in REAL tokens: Vietnamese runs ~5–7 tokens/word (diacritic-heavy BPE), so the
+        // old 256/512 caps truncated VI answers mid-sentence. 512 grounded / 1024 reason still leave
+        // ample context room inside the 4096 window (contextWordBudget reserves output first).
         {
           requestId: 'q',
           query: q,
           context: genContext,
           history,
           modelId,
-          maxTokens: answerMode === 'reason' ? 512 : 256,
+          maxTokens: answerMode === 'reason' ? 1024 : 512,
           answerMode
         },
         (t) => {
@@ -3855,7 +3866,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
           </p>
         </div>
         {#if gpu?.ok}
-          {@const rec = recommendModel(true)}
+          {@const rec = recommendModel(true, hwHint)}
           {#if rec}<button
               class="gate-auto nb-press"
               onclick={chooseAutoModel}

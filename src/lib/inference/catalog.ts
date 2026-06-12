@@ -98,17 +98,41 @@ export const CHAT_MODELS: ChatModel[] = [
 // GPUs (verified: Qwen2.5-7B runs in the browser). The ack just prevents a surprise multi-GB pull.
 export const BIG_MODEL_MB = 3500;
 
-/** The id we recommend by default — the quality/size sweet spot for most machines. */
-export const RECOMMENDED_MODEL_ID = 'Qwen2.5-3B-Instruct-q4f16_1-MLC';
+/** The id we recommend on a CAPABLE machine — the newest multilingual model, strongest on Vietnamese
+ *  and far better than a 3 B at extracting a fact buried in a long note (the small-model weakness that
+ *  drove this default). It's a ~5.7 GB download, so the OOM-ack + the picker remain the escape hatches. */
+export const RECOMMENDED_MODEL_ID = 'Qwen3-8B-q4f16_1-MLC';
+
+/** The fallback default for a WEAKER machine — the multilingual 3 B (quality/size sweet spot, modest
+ *  download). Still a real catalog entry the picker offers. */
+export const RECOMMENDED_LITE_MODEL_ID = 'Qwen2.5-3B-Instruct-q4f16_1-MLC';
+
+/** Coarse hardware signals the browser actually exposes (no VRAM API exists). */
+export interface HardwareHint {
+  deviceMemoryGB?: number; // navigator.deviceMemory — capped at 8 in most browsers, so "≥8" ≈ "8 GB+ RAM"
+  maxBufferBytes?: number; // WebGPU adapter.limits.maxBufferSize (a weak/old GPU may report a small one)
+}
 
 /**
- * Recommend the best model for the detected hardware (FR-CAP-001). With WebGPU we suggest the
- * multilingual 3 B (the quality/size sweet spot — modest download, strong on Vietnamese to pair
- * with bge-m3). No WebGPU → null (chat unsupported; semantic search still works).
+ * Is this machine capable enough to default to the heavy 8 B model? The browser exposes neither total
+ * VRAM nor a reliable proxy (maxBufferSize caps at ~2 GB on both 6 GB and 24 GB GPUs), so we key on
+ * deviceMemory — the one meaningful signal — and treat ≥8 GB RAM as "capable". A small reported GPU
+ * buffer (<256 MB, i.e. a very weak/old adapter) vetoes it. Weak/unknown machines fall back to the 3 B.
  */
-export function recommendModel(webgpu: boolean): ChatModel | null {
+export function isHighEndForChat(hw: HardwareHint): boolean {
+  if (hw.maxBufferBytes !== undefined && hw.maxBufferBytes < 256_000_000) return false;
+  return (hw.deviceMemoryGB ?? 0) >= 8;
+}
+
+/**
+ * Recommend the best model for the detected hardware (FR-CAP-001). With WebGPU: the newest multilingual
+ * 8 B on a capable machine, else the lighter multilingual 3 B. No WebGPU → null (chat unsupported;
+ * semantic search still works). `hw` omitted → conservative (the 3 B fallback).
+ */
+export function recommendModel(webgpu: boolean, hw: HardwareHint = {}): ChatModel | null {
   if (!webgpu) return null;
-  return modelById(RECOMMENDED_MODEL_ID) ?? CHAT_MODELS[0];
+  const id = isHighEndForChat(hw) ? RECOMMENDED_MODEL_ID : RECOMMENDED_LITE_MODEL_ID;
+  return modelById(id) ?? CHAT_MODELS[0];
 }
 
 export function modelById(id: string): ChatModel | undefined {

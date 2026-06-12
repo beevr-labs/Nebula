@@ -18,11 +18,12 @@ dist/
 *.nebula/
 NebulaVault/
 
-# os / editor
+# os / editor / agent session data (never commit)
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
+.claude/
 
 # logs & benches
 *.log
