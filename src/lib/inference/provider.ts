@@ -56,7 +56,12 @@ export interface InferenceProvider {
   // Raw (ungrounded) completion seam for non-RAG tasks — auto-tagging (FR-ING-006) and entity/
   // relation extraction (knowledge graph). Optional: a provider that only does grounded generation
   // may omit it, and callers degrade gracefully (the graph/tags are best-effort, never a hard fail).
-  complete?(prompt: string, opts?: { maxTokens?: number; signal?: AbortSignal }): Promise<string>;
+  // `json` (default true) forces structured JSON for the archivist tasks; pass false for free-form
+  // prose (e.g. HyDE query expansion, FR-RET) so the model isn't constrained to a JSON object.
+  complete?(
+    prompt: string,
+    opts?: { maxTokens?: number; signal?: AbortSignal; json?: boolean }
+  ): Promise<string>;
   // Model-cache management (FR-MDL): is this model already on disk, and remove it to free space.
   // Optional — a provider whose weights aren't browser-cached (e.g. native-Rust) omits both.
   isCached?(modelId: string): Promise<boolean>;

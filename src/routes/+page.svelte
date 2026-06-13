@@ -749,7 +749,7 @@ Set the search to **trip/** and ask *"Summarize the Japan trip — Tokyo, Kyoto 
       isCached: (m: string) => Promise<boolean>;
       deleteModel: (m: string) => Promise<void>;
       loadModel: (m: string, cb: (p: number) => void) => Promise<void>;
-      complete?: (p: string, o?: { maxTokens?: number }) => Promise<string>;
+      complete?: (p: string, o?: { maxTokens?: number; json?: boolean }) => Promise<string>;
       generate: (
         req: {
           requestId: string;
@@ -2119,6 +2119,39 @@ Set the search to **trip/** and ask *"Summarize the Japan trip — Tokyo, Kyoto 
     if (v === 'graph' && !selectedEntity && entityIndex.length) void openEntity(entityIndex[0]);
   }
 
+  // HyDE — Hypothetical Document Embeddings (FR-RET, the paraphrase-recall lever). MiniLM (chosen for
+  // fast indexing) scores abstract questions FAR from the notes that answer them — "What does each
+  // friend want to do?" vs a note reading "Maya loves art… Leo lives for food…". So before the vector
+  // search we ask the model for a SHORT hypothetical passage that WOULD answer the question, and embed
+  // the question + that passage, dragging the query embedding into the answering notes' neighborhood.
+  // Bounded + best-effort: skipped for short keyword lookups, and ANY failure falls back to the raw
+  // query, so a question never breaks (or hangs) on HyDE. Keeps MiniLM's fast indexing untouched.
+  async function hydeExpand(q: string): Promise<string> {
+    // NB: call through `pipe.provider.complete(...)` — extracting the method to a local loses its
+    // `this` binding (the engine handle), so HyDE must invoke it as a method, not a bare function.
+    if (!pipe?.provider.complete || !loadedModel) return q; // no chat model → plain query embedding
+    if (q.split(/\s+/).length < 3) return q; // short keyword lookup already retrieves well — skip
+    try {
+      // Qwen3's "/no_think" soft-switch must sit at the END of the user turn to disable the <think>
+      // block; with thinking on, a small token budget gets eaten by reasoning and no passage emerges.
+      const noThink = isReasoningModel(loadedModel) ? ' /no_think' : '';
+      const prompt =
+        `Write a brief, factual passage (1–2 sentences) that would directly answer the question ` +
+        `below, as if it were an excerpt from a note. Output only the passage.\n\n` +
+        `Question: ${q}\nPassage:${noThink}`;
+      // Bounded: a slow or wedged HyDE must never block the ask — after the deadline we fall back to
+      // embedding the raw query, so the worst case is "no recall boost", never a hang.
+      const raw = await Promise.race([
+        pipe.provider.complete(prompt, { maxTokens: 160, json: false }),
+        new Promise<string>((_, rej) => setTimeout(() => rej(new Error('hyde timeout')), 12_000))
+      ]);
+      const hyde = splitReasoning(raw).content.trim(); // strip any <think> block the model still emits
+      return hyde ? `${hyde}\n${q}` : q; // embed the hypothetical FIRST (the strong signal) + the query
+    } catch {
+      return q; // HyDE is a recall booster, never a hard dependency
+    }
+  }
+
   async function ask() {
     if (!pipe || busy || !query.trim()) return;
     const q = query.trim();
@@ -2136,8 +2169,10 @@ Set the search to **trip/** and ask *"Summarize the Japan trip — Tokyo, Kyoto 
     // active tab. We just drop any stale Magic-Jump highlight so the note shows in full.
     activeSpan = null;
     try {
+      status = 'understanding the question…';
+      const expanded = await hydeExpand(q); // HyDE: bridges abstract questions to the answering notes
       status = 'embedding query…';
-      const qv = await pipe.embed(q);
+      const qv = await pipe.embed(expanded);
       status = scope ? `retrieving (scoped: ${scopeLabel(scope)})…` : 'retrieving…';
       graphInfo = '';
       // Scoped retrieval (FR-RET-004): over-fetch then keep only in-scope hits so a question
