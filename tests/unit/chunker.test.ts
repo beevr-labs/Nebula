@@ -4,9 +4,41 @@ import {
   assertChunkWindow,
   approxTokenCount,
   approxSizingIsSafe,
+  pickChunking,
   MAX_BGE_TOKENS_PER_WORD
 } from '../../src/lib/ingest/chunker';
 import { EMBEDDING_MAX_TOKENS } from '../../src/lib/inference/provider';
+
+describe('pickChunking — adaptive sizing keeps the chunk count bounded for huge notes', () => {
+  it('keeps the small high-precision default for a normal note', () => {
+    expect(pickChunking(5_000)).toEqual({ size: 60, overlap: 12 });
+    expect(pickChunking(30_000)).toEqual({ size: 60, overlap: 12 });
+  });
+  it('grows the chunk size with the document, monotonically', () => {
+    const sizes = [10_000, 100_000, 400_000, 2_000_000].map((n) => pickChunking(n).size);
+    for (let i = 1; i < sizes.length; i++) expect(sizes[i]).toBeGreaterThanOrEqual(sizes[i - 1]);
+  });
+  it('every tier stays a valid, window-safe chunk size (no silent truncation)', () => {
+    for (const n of [1_000, 100_000, 500_000, 2_000_000, 50_000_000]) {
+      const { size, overlap } = pickChunking(n);
+      expect(() => assertChunkWindow(size)).not.toThrow(); // size < EMBEDDING_MAX_TOKENS
+      expect(overlap).toBeLessThan(size);
+    }
+  });
+  it('cuts the chunk count several-fold on a ~2 MB note vs the fixed small size', () => {
+    // ~2 MB of repeated prose (whitespace-counter approximation of the real reduction ratio).
+    const para =
+      'Ghi chú dài về dự án và ngân sách quý này với nhiều chi tiết lặp lại để mô phỏng một tài liệu lớn. ';
+    const big = para.repeat(20_000); // ≈ 2 MB
+    expect(big.length).toBeGreaterThan(1_500_000);
+
+    const fixed = chunk(big, { size: 60, overlap: 12 }).length;
+    const { size, overlap } = pickChunking(big.length);
+    const adaptive = chunk(big, { size, overlap }).length;
+
+    expect(adaptive).toBeLessThan(fixed / 3); // at least ~3× fewer chunks → ~3× less embed + DB work
+  });
+});
 
 // FR-ING-002/003 · ALGORITHMS §1. Sized with the injected/default token counter.
 

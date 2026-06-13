@@ -6,7 +6,9 @@
   // (FR-CHAT-003); the Weaver auto-wikilinks (FR-LINK-001/002); Micro-Map (FR-GRAPH-001/002);
   // Export Vault → .zip of .md proxies + original binaries under sources/ (FR-DATA-006). In-browser.
   import '$lib/styles/tokens.css';
+  import 'katex/dist/katex.min.css'; // self-hosted math styles + fonts (bundled, zero external calls)
   import { onMount, tick } from 'svelte';
+  import Coachmarks, { type Step as CoachStep } from '$lib/onboard/Coachmarks.svelte';
   import type { SearchHit } from '$lib/inference/provider';
   import type { NoteRecord, ExpandedHit } from '$lib/db/store';
   import { buildTitleIndex, notePreview } from '$lib/weave/weaver';
@@ -28,6 +30,7 @@
   import { resolveCitationTarget, buildHighlightSegments, answerUsage } from '$lib/chat/citation';
   import { exportVaultZip } from '$lib/vault/export';
   import { intake } from '$lib/ingest/intake';
+  import { pickChunking } from '$lib/ingest/chunker';
   import { csvLinearize } from '$lib/ingest/csv';
   import { buildProxyNote, proxyNotePath } from '$lib/ingest/proxy';
   import {
@@ -143,17 +146,17 @@ This demo has two little notebooks so you can see what it does: a **Japan trip**
 ## 1 · Ask your notes  (press ⌘J)
 - **Synthesize across notes:** *"What does each friend want to do in Japan?"*
 - **Add up the numbers:** *"What's the total budget per person for the trip?"*
-- **Reason, don't just quote** (Reason mode): *"Based on my sleep notes, what should I change in my routine?"*
+- **Get advice, not just quotes** (turn on **Think it through**): *"Based on my sleep notes, what should I change in my routine?"*
 - **Follow up:** after an answer, ask *"and why?"* — it remembers the conversation.
 - **Cited & verifiable:** answers show [#1] markers — click one to jump to the exact note.
 
-## 2 · See the knowledge graph  (Graph tab → Build entity graph)
-Nebula links your notes through shared **people, places and ideas**, even when they share no words.
-- Open the **Graph** tab, click **Build entity graph**, then open an entity like **Maya** or **caffeine** — you'll see every note connected to it.
+## 2 · See how your notes connect
+Nebula links your notes through shared **people, places and topics**, even when they share no words.
+- In the sidebar under **People, places & topics**, open one like **Maya** or **caffeine** — you'll see every note connected to it.
 - In Ask, try *"What is Maya planning across the whole trip?"* — it gathers every note she appears in.
 
-## 3 · Keep topics apart  (Scope)
-Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only ever get trip notes, never your research.
+## 3 · Keep topics apart
+Set the search to **trip/** and ask *"Summarize our Japan trip"* — you'll only ever get trip notes, never your research.
 
 ## 4 · Make it yours
 - **New note** to write; link notes with \`[[double brackets]]\`; tag with \`#hashtags\`.
@@ -602,6 +605,15 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
   $effect(() => {
     if (typeof document !== 'undefined') document.documentElement.dataset.theme = theme;
   });
+
+  // Advanced mode (FR-UI): off by default → plain language, no metrics. On → surfaces the technical
+  // readouts (GPU/CPU speed, answer latency/throughput, retrieval scores, raw graph counts) that
+  // power users want. Initialized from ui-prefs in onMount.
+  let advanced = $state(false);
+  function toggleAdvanced() {
+    advanced = !advanced;
+    uiPrefs.setAdvanced(advanced);
+  }
   let entityQuery = $state(''); // filter box for the Graph-mode entity list
 
   // Empty folders the user created (folders are otherwise derived from note paths) — persisted in
@@ -625,6 +637,53 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
   let wantBackgroundLoad = false; // a model was chosen before `pipe` existed → load once it's ready
   let cachedModels = $state<Set<string>>(new Set()); // model ids already downloaded to this browser
   let deletingModel = $state(''); // id mid-deletion (disables its row)
+
+  // First-run guided tour (coach-marks) — a plain-language walkthrough that runs once the model gate
+  // is dismissed. Deliberately jargon-free: it never says "index", "embedding", "RAG" or "graph",
+  // only what the user gets. Re-runnable any time via the "Take a tour" topbar button.
+  let tourOn = $state(false);
+  const TOUR_STEPS: CoachStep[] = [
+    {
+      title: '👋 Welcome to Nebula',
+      body: 'Nebula turns your notes into something you can ask questions about — and everything runs right here on your device. Nothing is ever uploaded. Here are the four things worth knowing.'
+    },
+    {
+      selector: '[data-coach="ask"]',
+      placement: 'left',
+      title: 'Ask your notes anything',
+      body: 'Type a question here — like “What’s the total budget for the trip?” — and Nebula answers using your own notes, with links back to where it found each fact. Press ⌘J to jump here anytime.'
+    },
+    {
+      selector: '[data-coach="modes"]',
+      placement: 'top',
+      title: 'Two ways to answer',
+      body: '“Just quote my notes” sticks strictly to what you wrote. “Think it through” lets the assistant reason and give advice. Pick whichever fits your question.'
+    },
+    {
+      selector: '[data-coach="graph"]',
+      placement: 'right',
+      title: 'See how your notes connect',
+      body: 'Nebula automatically links notes that share the same people, places and topics — even when they don’t share any words. Open one to see everything related to it.'
+    },
+    {
+      selector: '[data-coach="new"]',
+      placement: 'right',
+      title: 'Make it your own',
+      body: 'Add your own notes with the + button, or just drag in a PDF or spreadsheet — it becomes searchable too. When you’re ready, you can delete the example notes.'
+    },
+    {
+      title: '✨ You’re all set',
+      body: 'Try asking a question in the panel on the right. You can replay this tour anytime from the “?” button at the top.'
+    }
+  ];
+  function startTour() {
+    tourOn = false; // force a clean remount so the tour always restarts at step 1
+    void tick().then(() => (tourOn = true));
+  }
+  function endTour() {
+    tourOn = false;
+    uiPrefs.setTutorialDone(true);
+  }
 
   // Context Compiler UI (FR-CTX-*) — compact, token-counted share to another LLM.
   const COMPILE_MODELS = ['gpt-4o', 'gpt-4', 'claude-sonnet', 'claude-opus'];
@@ -721,6 +780,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
   onMount(async () => {
     coi = crossOriginIsolated;
     theme = uiPrefs.getTheme();
+    advanced = uiPrefs.getAdvanced();
     // Probe WebGPU once at startup (FR-CAP-001, ADR-030): is chat possible and on what GPU? Drives the
     // GPU status line + the model recommendation. (We deliberately do NOT read maxBufferSize as a load
     // cap — WebLLM shards weights across buffers, so large models load fine on capable GPUs.)
@@ -785,7 +845,11 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
       text: string,
       onProgress?: (done: number, total: number) => void
     ) => {
-      const embedded = await embedClient.indexText(text, { size: 60, overlap: 12 }, onProgress);
+      // Adaptive sizing (chunker.pickChunking): a normal note keeps the small high-precision chunks,
+      // but a 2 MB paste/book uses bigger chunks so the chunk count — and the background embed + DB
+      // write it drives — stays bounded instead of exploding to tens of thousands of vectors.
+      const { size, overlap } = pickChunking(text.length);
+      const embedded = await embedClient.indexText(text, { size, overlap }, onProgress);
       await store.upsertChunks(
         embedded.map((e) => ({
           chunkId: `${docId}#${e.chunk.seq}`,
@@ -1155,11 +1219,11 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
       const modelIssue = /model|pipeline|onnx|fetch|network|load|download|gpu|wasm/i.test(firstErr);
       flashIndexed(
         modelIssue
-          ? "⚠ couldn't load the embedding model — check connection, then save again to retry"
-          : `⚠ ${failed} note${failed > 1 ? 's' : ''} failed to index`
+          ? "⚠ couldn't get ready to search — check your connection, then save again to retry"
+          : `⚠ ${failed} note${failed > 1 ? 's' : ''} couldn't be read`
       );
     } else if (doneCount > 0)
-      flashIndexed(`indexed ${doneCount === 1 ? truncate(lastName, 22) : `${doneCount} notes`}`);
+      flashIndexed(`saved ${doneCount === 1 ? truncate(lastName, 22) : `${doneCount} notes`}`);
 
     // PASS 2 — entity graph, heuristic ONLY (proper nouns + wikilinks + co-occurrence, no model) so
     // a saved note's entities are visible IMMEDIATELY. The LLM enrichment tier was removed: it cost
@@ -1183,7 +1247,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     }
     indexRunning = false;
     if (entSum > 0)
-      flashIndexed(`graph updated · ${entSum} ${entSum === 1 ? 'entity' : 'entities'}`);
+      flashIndexed(`connected · ${entSum} ${entSum === 1 ? 'topic' : 'topics'}`);
     await refreshEntities(); // once, after the queue drains — never per-job (avoids the read/write race)
     // The heuristic graph is the whole graph now — a save is never "behind" waiting on a model.
     graphStale = false;
@@ -1769,8 +1833,12 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     else wantBackgroundLoad = true; // onMount fires it once the pipeline finishes initializing
   }
   function closeModelGate() {
+    const firstRun = !uiPrefs.isOnboarded();
     modelGate = false;
     uiPrefs.setOnboarded(true);
+    // First time the gate is dismissed (picked or skipped) → roll straight into the guided tour,
+    // unless the user has already seen it. Deferred a tick so the gate overlay is fully gone first.
+    if (firstRun && !uiPrefs.isTutorialDone()) startTour();
   }
   function chooseModel(id: string) {
     if (modelLoading) return; // a load is already in flight — can't switch until it finishes
@@ -2632,6 +2700,15 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
         x2="13.5"
         y2="8"
       /><line x1="2.5" y1="11.5" x2="13.5" y2="11.5" />
+    {:else if name === 'help'}<circle cx="8" cy="8" r="6.5" /><path
+        d="M6.1 6.2a1.9 1.9 0 0 1 3.7.6c0 1.3-1.8 1.6-1.8 2.7"
+      /><circle cx="8" cy="11.6" r="0.4" fill="currentColor" stroke="none" />
+    {:else if name === 'gauge'}<path d="M2.5 11a5.5 5.5 0 1 1 11 0" /><line
+        x1="8"
+        y1="8"
+        x2="10.5"
+        y2="6"
+      /><circle cx="8" cy="8" r="0.6" fill="currentColor" stroke="none" />
     {/if}
   </svg>
 {/snippet}
@@ -2700,7 +2777,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     <div class="tb-center">
       <button class="omnibox nb-hov nb-focusable" onclick={openSwitcher} title="Search or ask (⌘K)">
         <span class="omni-ic">{@render ic('search', 15)}</span>
-        <span class="omni-txt">Search or ask your vault…</span>
+        <span class="omni-txt">Search or ask your notes…</span>
         <kbd>⌘K</kbd>
       </button>
     </div>
@@ -2718,33 +2795,50 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
           'Model'}{@render ic('chevdown', 12)}
       </button>
       {#if bgPending > 0}
-        <span class="pill busy-pill"
-          ><span class="spinner"></span>indexing{bgProgress ? ` ${bgProgress}` : ''}</span
+        <span class="pill busy-pill" title="Getting your notes ready to search"
+          ><span class="spinner"></span>Reading notes…{bgProgress ? ` ${bgProgress}` : ''}</span
         >
       {:else if graphBuilding > 0}
         <span
           class="pill busy-pill"
-          title="Chunks are indexed and searchable; the entity graph is still extracting (background)"
-          ><span class="spinner"></span>building graph…</span
+          title="Your notes are searchable; still linking related ones in the background"
+          ><span class="spinner"></span>Connecting notes…</span
         >
       {:else if indexDone}
-        <span class="pill ok-pill" title="Background indexing finished">
+        <span class="pill ok-pill" title="Your notes are ready">
           {@render ic('check', 13)}
           {indexDone}</span
         >
       {:else if ready}
-        <span class="pill ok-pill">{@render ic('check', 13)} indexed</span>
+        <span class="pill ok-pill" title="Your notes are ready to search"
+          >{@render ic('check', 13)} Ready</span
+        >
       {/if}
-      {#if embedBackend && embedBackend.device}
+      {#if advanced && embedBackend && embedBackend.device}
+        <!-- Advanced mode: full backend readout (device + measured throughput). -->
         <span
           class="pill {embedBackend.device === 'webgpu' ? 'ok-pill' : 'warn-pill'}"
           title={embedBackend.device === 'webgpu'
             ? `Embedding runs on the GPU (WebGPU) — ${embedBackend.chunksPerSec} chunks/sec`
-            : `Embedding fell back to CPU (~${embedBackend.chunksPerSec} chunks/sec) — much slower than GPU. Check that WebGPU is enabled in your browser (e.g. chrome://flags, hardware acceleration).`}
+            : `Embedding runs on the CPU (~${embedBackend.chunksPerSec} chunks/sec) — much slower than GPU. Enable WebGPU / hardware acceleration for best speed.`}
         >
-          {#if embedBackend.device === 'webgpu'}{@render ic('bolt', 12)}GPU{:else}CPU · slow{/if}
+          {#if embedBackend.device === 'webgpu'}{@render ic('bolt', 12)}GPU{:else}CPU{/if} ·
+          {embedBackend.chunksPerSec}/s
         </span>
+      {:else if embedBackend && embedBackend.device === 'cpu'}
+        <!-- Default (plain) mode: surface only the actionable slow-path, no hardware jargon. -->
+        <span
+          class="pill warn-pill"
+          title="This device is running Nebula in a slower mode. For best speed, use Chrome or Edge with hardware acceleration enabled."
+          >Slower mode</span
+        >
       {/if}
+      <button
+        class="icon-btn nb-hov nb-press"
+        onclick={startTour}
+        title="Take a quick tour"
+        aria-label="Take a quick tour">{@render ic('help', 16)}</button
+      >
       <a
         class="icon-btn nb-hov nb-press"
         href="https://github.com/thienzz/Nebula"
@@ -2755,6 +2849,15 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
       >
       <button class="icon-btn nb-hov nb-press" onclick={exportVault} title="Export vault"
         >{@render ic('download', 16)}</button
+      >
+      <button
+        class="icon-btn nb-hov nb-press"
+        class:active={advanced}
+        onclick={toggleAdvanced}
+        title={advanced
+          ? 'Advanced mode on — showing technical details'
+          : 'Advanced mode — show technical details'}
+        aria-pressed={advanced}>{@render ic('gauge', 16)}</button
       >
       <button class="icon-btn nb-hov nb-press" onclick={toggleTheme} title="Toggle theme"
         >{@render ic(theme === 'dark' ? 'sun' : 'moon', 16)}</button
@@ -2767,13 +2870,13 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     <div class="model-banner">
       <span class="spinner"></span>
       <span
-        >Setting up on-device chat model · <strong>{modelById(modelId)?.label ?? 'model'}</strong
+        >Getting your assistant ready · <strong>{modelById(modelId)?.label ?? 'model'}</strong
         ></span
       >
       <span class="mb-bar"><span class="mb-fill" style="width:{loadPct}%"></span></span>
       <span class="mb-pct">{loadPct}%</span>
       <span class="mb-div"></span>
-      <span class="mb-note">Semantic search works now — no GPU needed</span>
+      <span class="mb-note">You can search your notes already — no waiting</span>
     </div>
   {/if}
 
@@ -2794,6 +2897,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
           <span class="label">Vault · {vault.length}</span>
           <button
             class="ghost-ic nb-hov nb-press"
+            data-coach="new"
             title="New note / folder"
             onclick={(e) => openCtxMenu(e, 'root', '')}>{@render ic('plus', 14)}</button
           >
@@ -2822,8 +2926,10 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
           {@render tree(fileTree)}
         {/if}
 
-        <div class="side-head mt">
-          <span class="label">Entities</span><span class="tree-count">{entityIndex.length}</span>
+        <div class="side-head mt" data-coach="graph">
+          <span class="label">People, places &amp; topics</span><span class="tree-count"
+            >{entityIndex.length}</span
+          >
         </div>
         {#if entityIndex.length}
           <div class="ent-list" class:scroll={showAllEntities}>
@@ -2850,12 +2956,12 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
             </button>
           {/if}
           <button class="ent-row open-lens nb-hov" onclick={() => switchView('graph')}>
-            <span class="lens-ic">{@render ic('graph', 14)}</span> Open graph lens
+            <span class="lens-ic">{@render ic('graph', 14)}</span> See connections
           </button>
         {:else}
           <button class="build-graph nb-press" onclick={buildVaultGraph} disabled={graphBusy}>
-            {#if graphBusy}<span class="spinner"></span>extracting…{:else}{@render ic('graph', 14)} Build
-              entity graph{/if}
+            {#if graphBusy}<span class="spinner"></span>connecting…{:else}{@render ic('graph', 14)} Connect
+              my notes{/if}
           </button>
         {/if}
         {#if graphStale && entityIndex.length}
@@ -2865,10 +2971,10 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
             class="graph-stale nb-hov"
             onclick={buildVaultGraph}
             disabled={graphBusy}
-            title="New notes aren't in the graph yet — update to extract their entities"
+            title="New notes aren't connected yet — update to include them"
           >
             {#if graphBusy}<span class="spinner"></span>updating…{:else}{@render ic('graph', 12)} Update
-              graph — new notes pending{/if}
+              connections — new notes pending{/if}
           </button>
         {/if}
 
@@ -2889,7 +2995,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
       <div class="side-foot">
         <div class="scope-pill">
           <span class="scope-ic">{@render ic('box', 15)}</span>
-          <span class="scope-lbl">Scope</span>
+          <span class="scope-lbl">Search in</span>
           <select
             class="scope-select"
             value={scope
@@ -2898,9 +3004,9 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
                 : `tag:${scope.value}`
               : ''}
             onchange={(e) => setScope(e.currentTarget.value)}
-            title="Limit Ask + Compile to one client (no cross-client bleed)"
+            title="Limit questions and sharing to one folder or tag"
           >
-            <option value="">whole vault</option>
+            <option value="">all notes</option>
             {#if folderScopes.length}
               <optgroup label="Folders"
                 >{#each folderScopes as f (f)}<option value={`folder:${f}`}>{f}/</option
@@ -2925,18 +3031,19 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
         <!-- GRAPH LENS -->
         <div class="lens-head">
           <span class="lens-ic accent">{@render ic('graph', 18)}</span>
-          <span class="lens-title">Graph lens</span>
+          <span class="lens-title">{advanced ? 'Graph lens' : 'Connections'}</span>
           <span class="lens-sub"
-            >{entityIndex.length} entities · {entityRelationCount} relations</span
+            >{#if advanced}{entityIndex.length} entities · {entityRelationCount} relations{:else}{entityIndex.length}
+              topics · {entityRelationCount} links{/if}</span
           >
           <span class="spacer"></span>
           {#if entityIndex.length}<span class="pill ok-pill"
-              >{@render ic('check', 13)} graph built</span
+              >{@render ic('check', 13)} ready</span
             >{/if}
           <button
             class="icon-btn nb-hov nb-press"
             onclick={() => switchView('files')}
-            title="Close lens">{@render ic('close', 15)}</button
+            title="Close">{@render ic('close', 15)}</button
           >
         </div>
         <div class="lens-body">
@@ -3031,10 +3138,8 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
               </div>
             {:else}
               <div class="center-empty">
-                <p>No relations extracted for <strong>{selectedEntity.name}</strong> yet.</p>
-                <button class="ghost-btn" onclick={buildVaultGraph}
-                  >↻ Rebuild with a stronger model</button
-                >
+                <p>Nothing connected to <strong>{selectedEntity.name}</strong> yet.</p>
+                <button class="ghost-btn" onclick={buildVaultGraph}>↻ Try connecting again</button>
               </div>
             {/if}
             {#if entityNotes.length}
@@ -3056,7 +3161,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
           {:else}
             <div class="center-empty">
               <span class="empty-ic">{@render ic('graph', 26)}</span>
-              <p>Pick an entity to see how it connects across your vault.</p>
+              <p>Pick one to see how it connects across your notes.</p>
             </div>
           {/if}
         </div>
@@ -3296,7 +3401,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
       <div class="rail-head">
         <span class="rail-title">Ask</span>
         <span class="rail-scope"
-          >scoped to <span class="mono">{scope ? scopeLabel(scope) : 'whole vault'}</span></span
+          >searching <span class="mono">{scope ? scopeLabel(scope) : 'all notes'}</span></span
         >
         <span class="spacer"></span>
         {#if history.length || answer || hits.length}
@@ -3364,6 +3469,11 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
                 >{/if}
               {#if graphInfo}<span class="us-div"></span><span class="us-graph">{graphInfo}</span
                 >{/if}
+              {#if advanced && (ttft > 0 || tps > 0)}<span class="us-div"></span><span
+                  class="us-perf"
+                  title="Time to first token · generation throughput"
+                  >{@render ic('bolt', 12)}{ttft} ms · {tps} tok/s</span
+                >{/if}
             </div>
             <div class="label">Sources</div>
             <div class="src-list">
@@ -3375,14 +3485,14 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
                   <span class="src-path mono">{h.docId}</span>
                   {#if viaGraph}<span class="src-graph"
                       >↳ {(graphShared.get(h.chunkId)?.sharedEntities ?? []).join(', ')}</span
-                    >{:else}<span class="src-why">vector</span>{/if}
-                  <span class="src-score mono">{h.score.toFixed(2)}</span>
+                    >{:else}<span class="src-why">{advanced ? 'vector' : 'match'}</span>{/if}
+                  {#if advanced}<span class="src-score mono">{h.score.toFixed(2)}</span>{/if}
                 </button>
               {/each}
             </div>
             {#if graph}
               <div class="micromap">
-                <div class="label sm">Retrieval sub-graph</div>
+                <div class="label sm">{advanced ? 'Retrieval sub-graph' : 'How this answer was found'}</div>
                 <svg
                   width="100%"
                   height={32 + graph.nodes.filter((n) => n.kind === 'chunk').length * 26}
@@ -3416,13 +3526,13 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
               </div>
             {/if}
             <button class="compile-btn nb-press" onclick={openCompileFromHits}
-              >{@render ic('box', 16)} Compile this context</button
+              >{@render ic('box', 16)} Share with another AI</button
             >
           {/if}
         {:else}
           <p class="rail-idle">
-            Ask anything about your notes. Answers are grounded in your vault and cite their
-            sources.
+            Ask anything about your notes. Answers come only from what you’ve written, and link back
+            to where each fact came from.
           </p>
           <div class="label">Try</div>
           <div class="try-list">
@@ -3440,12 +3550,12 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
         {/if}
       </div>
 
-      <div class="composer">
+      <div class="composer" data-coach="ask">
         <div class="composer-box">
           <textarea
             bind:value={query}
             rows="1"
-            placeholder="Ask a question…"
+            placeholder="Ask a question about your notes…"
             disabled={busy}
             onkeydown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
@@ -3463,25 +3573,27 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
           >
         </div>
         <div class="composer-foot">
-          <div class="mode-chips">
+          <div class="mode-chips" data-coach="modes">
             <button
               class="mchip nb-hov"
               class:on={answerMode === 'reason'}
               onclick={() => (answerMode = 'reason')}
-              title="Reason with your notes">{@render ic('bolt', 12)} Reason</button
+              title="Let the assistant reason over your notes and give advice"
+              >{@render ic('bolt', 12)} {advanced ? 'Reason' : 'Think it through'}</button
             >
             <button
               class="mchip nb-hov"
               class:on={answerMode === 'grounded'}
               onclick={() => (answerMode = 'grounded')}
-              title="Strict, verifiable">Grounded</button
+              title="Stick strictly to what your notes actually say"
+              >{advanced ? 'Grounded' : 'Just quote my notes'}</button
             >
             <button
               class="mchip nb-hov"
               class:on={graphRagOn}
               onclick={() => (graphRagOn = !graphRagOn)}
-              title="Pull in chunks connected through shared entities"
-              >{@render ic('graph', 12)} GraphRAG</button
+              title="Also pull in related notes that share the same people, places or topics"
+              >{@render ic('graph', 12)} {advanced ? 'GraphRAG' : 'Connect ideas'}</button
             >
           </div>
           <span class="dim sm">Runs on your device</span>
@@ -3538,7 +3650,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
           <input
             id="switcher-input"
             bind:value={switcherQuery}
-            placeholder="Jump to a note, entity — or ask a question…"
+            placeholder="Jump to a note or topic — or ask a question…"
             autocomplete="off"
           />
           <kbd>esc</kbd>
@@ -3831,9 +3943,10 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     <div class="overlay center" role="presentation">
       <div class="gate nb-rise" role="dialog" aria-modal="true" aria-label="Choose a model">
         <div class="gate-head">
-          <strong>On-device chat model</strong>
+          <strong>Your private AI assistant</strong>
           <p class="dim sm">
-            Runs on your GPU via WebGPU · downloaded once, then offline. No account, no upload.
+            Runs entirely on your computer — downloaded once, then works offline. No account, and
+            nothing ever leaves your device.
           </p>
         </div>
         {#if gpu?.ok}
@@ -3842,8 +3955,8 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
               class="gate-auto nb-press"
               onclick={chooseAutoModel}
               disabled={modelLoading}
-              ><span>★ Auto — {rec.label}</span><small class="dim"
-                >recommended for your GPU · {formatSize(rec.sizeMB)}</small
+              ><span>★ Recommended — {rec.label}</span><small class="dim"
+                >best fit for your device · {formatSize(rec.sizeMB)}</small
               ></button
             >{/if}
           <div class="gate-list">
@@ -3876,17 +3989,21 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
             {/each}
           </div>
           <button class="gate-skip" onclick={closeModelGate}
-            >Skip — semantic search, notes & graph still work</button
+            >Skip for now — search and notes still work</button
           >
         {:else}
           <div class="gate-nowebgpu">
-            ⚠ No WebGPU — on-device chat is unavailable here, but semantic search, notes, and the
-            graph all work. Use Chrome/Edge on a GPU-capable device for chat.
+            ⚠ This device can’t run the AI assistant, but searching and writing notes still work
+            fully. For the assistant, try Chrome or Edge on a computer with a graphics card.
           </div>
           <button class="gate-skip" onclick={closeModelGate}>Continue</button>
         {/if}
       </div>
     </div>
+  {/if}
+
+  {#if tourOn}
+    <Coachmarks steps={TOUR_STEPS} onDone={endTour} />
   {/if}
 </main>
 
@@ -4025,6 +4142,12 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     color: var(--muted);
     text-decoration: none; /* also used as an <a> (the GitHub link) */
     cursor: pointer;
+  }
+  .icon-btn.active {
+    /* Advanced-mode toggle, lit while on. */
+    border-color: var(--accent-rim);
+    background: var(--accent-soft);
+    color: var(--accent-ink);
   }
   .pill {
     display: inline-flex;
@@ -5067,6 +5190,13 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
   }
   .us-graph {
     color: var(--ink-2);
+  }
+  .us-perf {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
   }
   .src-list {
     display: flex;

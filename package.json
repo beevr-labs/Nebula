@@ -25,6 +25,7 @@
     "@surrealdb/wasm": "^1",
     "gpt-tokenizer": "^2",
     "gray-matter": "^4",
+    "katex": "^0.16.47",
     "pdfjs-dist": "^4",
     "surrealdb": "^1"
   },
@@ -33,6 +34,7 @@
     "@sveltejs/adapter-static": "^3",
     "@sveltejs/kit": "^2",
     "@sveltejs/vite-plugin-svelte": "^4",
+    "@types/katex": "^0.16.8",
     "@typescript-eslint/eslint-plugin": "^8",
     "@typescript-eslint/parser": "^8",
     "@webgpu/types": "^0.1.70",

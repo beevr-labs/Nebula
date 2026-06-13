@@ -72,6 +72,26 @@ export function assertChunkWindow(size: number, maxTokens: number = EMBEDDING_MA
   }
 }
 
+/**
+ * Adaptive chunk sizing by document length (FR-ING-003, perf). The embed + DB-write cost is linear in
+ * CHUNK COUNT, and at the small default size a single huge note (a pasted book, a 2 MB export) explodes
+ * to ~5 chunks/KB — tens of thousands of vectors, a minute-plus of background embedding. Short notes
+ * keep the small, high-precision default; progressively larger notes get progressively larger chunks
+ * so the chunk count — and therefore indexing time — stays bounded, trading a little retrieval
+ * granularity (which matters less inside a very long document) for a multiple-x speedup.
+ *
+ * Every size stays strictly below the embedding window (EMBEDDING_MAX_TOKENS = 512). Once `size`
+ * exceeds the whitespace-safe range (~84), the embed Worker loads the model's real tokenizer so chunks
+ * are measured — and capped — in true model tokens (see approxSizingIsSafe / makeBgeTokenCounter), so
+ * bigger chunks never risk silent truncation (R-1, ADR-006).
+ */
+export function pickChunking(charLen: number): { size: number; overlap: number } {
+  if (charLen <= 30_000) return { size: 60, overlap: 12 }; // normal note — keep max retrieval precision
+  if (charLen <= 150_000) return { size: 120, overlap: 20 };
+  if (charLen <= 600_000) return { size: 220, overlap: 36 };
+  return { size: 360, overlap: 56 }; // huge paste / book — keep the chunk count (and embed time) bounded
+}
+
 const SEPARATORS = ['\n## ', '\n\n', '\n', '. ', ' '];
 
 interface Segment {

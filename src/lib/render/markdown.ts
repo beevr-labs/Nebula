@@ -8,9 +8,47 @@
 // bodies (no XSS, the local-first threat that matters here). Deliberately NOT full CommonMark:
 // raw HTML, reference links, and exotic nesting are out of scope (ADR-016). Pure. ALGORITHMS §18.
 
+import katex from 'katex';
+
 export interface RenderOptions {
   /** Resolve a `[[target]]` to a note; returns null for a broken link. */
   resolveLink?: (target: string) => { docId: string; title: string } | null;
+}
+
+/**
+ * Render a LaTeX span to KaTeX HTML (FR-UI: math in notes + chat answers). `display` picks block vs
+ * inline mode. KaTeX `renderToString` is pure, synchronous, and emits its OWN safe HTML from the TeX
+ * source — it never passes raw HTML through (default `trust:false`), so the escape-first contract
+ * holds. `throwOnError:false` renders malformed TeX as inline red text instead of throwing; the
+ * try/catch is a final backstop that falls back to the literal (escaped) source.
+ */
+/**
+ * Decide whether a `$…$` pair is real math vs an accidental currency pairing ("$700 and hotels $").
+ * Used ONLY for the ambiguous single-`$` inline case (display delimiters are unambiguous). Classifying
+ * each balanced PAIR by its content — instead of skipping individual `$` — avoids the cascade where a
+ * skipped opening `$` lets its partner open a bogus span swallowing a whole sentence. Math iff the
+ * content carries a math signal: a TeX command/brace/relation/sub-superscript, a binary operator
+ * between operands ("2 > 0", "ax + b"), or a lone short symbol ("x", "x1").
+ */
+function looksLikeMath(s: string): boolean {
+  const t = s.trim();
+  if (!t) return false;
+  if (/[\\{}^_~|<>=]/.test(t)) return true; // TeX command, brace, sub/superscript, relation
+  if (/[A-Za-z0-9)\].]\s*[-+*/]\s*[-(.\\\dA-Za-z]/.test(t)) return true; // a binary operator: a + b, 2 > 0
+  if (/^[A-Za-z][A-Za-z0-9]{0,2}$/.test(t)) return true; // a lone short variable/symbol
+  return false;
+}
+
+function renderMath(tex: string, display: boolean): string {
+  try {
+    return katex.renderToString(tex.trim(), {
+      displayMode: display,
+      throwOnError: false,
+      strict: false
+    });
+  } catch {
+    return `<code class="math-error">${escapeHtml(tex.trim())}</code>`;
+  }
 }
 
 /**
@@ -68,6 +106,17 @@ function inline(text: string, opts: RenderOptions): string {
   let s = text;
   // 1. inline code — protect verbatim (no inner formatting), escaped.
   s = s.replace(/`([^`\n]+)`/g, (_m, c: string) => keep(`<code>${escapeHtml(c)}</code>`));
+  // 1b. LaTeX math (KaTeX) — protect as rendered HTML BEFORE escaping touches the TeX. Display
+  // delimiters ($$…$$, \[…\]) first, then inline (\(…\), $…$). The single-$ case is ambiguous with
+  // currency, so each balanced PAIR is classified by content (looksLikeMath): "$2 > 0$" / "$ ax+b $"
+  // / "$x$" render; "$700 and hotels $500" and "$1,900" stay verbatim text — and because we judge per
+  // pair (not per `$`), a currency pair can never cascade into a bogus span over the next sentence.
+  s = s.replace(/\$\$([\s\S]+?)\$\$/g, (_m, tex: string) => keep(renderMath(tex, true)));
+  s = s.replace(/\\\[([\s\S]+?)\\\]/g, (_m, tex: string) => keep(renderMath(tex, true)));
+  s = s.replace(/\\\(([\s\S]+?)\\\)/g, (_m, tex: string) => keep(renderMath(tex, false)));
+  s = s.replace(/\$([^$\n]+?)\$/g, (m: string, tex: string) =>
+    looksLikeMath(tex) ? keep(renderMath(tex, false)) : m
+  );
   // 2. wikilinks [[target]] / [[target|alias]] / [[target#heading]]
   s = s.replace(/\[\[([^[\]\n]+)\]\]/g, (_m, inner: string) => {
     const pipe = inner.indexOf('|');

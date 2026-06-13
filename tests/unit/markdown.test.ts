@@ -136,3 +136,57 @@ describe('linkifyCitations', () => {
     expect(out).toContain('data-cite="9"');
   });
 });
+
+describe('renderMarkdown — LaTeX math (KaTeX)', () => {
+  it('renders inline $…$ math to KaTeX HTML', () => {
+    const html = renderMarkdown('Solve $ax + b > 0$ for x.');
+    expect(html).toContain('class="katex"');
+    expect(html).not.toContain('$ax'); // the raw delimiters are consumed
+  });
+
+  it('renders display $$…$$ and \\[…\\] as block (displayMode)', () => {
+    expect(renderMarkdown(String.raw`$$\frac{1}{2}$$`)).toContain('katex-display');
+    expect(renderMarkdown(String.raw`\[ x = \frac{-b}{a} \]`)).toContain('katex-display');
+  });
+
+  it('renders inline \\(…\\) math', () => {
+    expect(renderMarkdown(String.raw`the value \(x^2\) here`)).toContain('class="katex"');
+  });
+
+  it('does NOT treat currency like $1,900 as math', () => {
+    const html = renderMarkdown('The budget is $1,900 each.');
+    expect(html).not.toContain('katex');
+    expect(html).toContain('$1,900');
+  });
+
+  it('leaves a $700 … $500 currency pair as text', () => {
+    const html = renderMarkdown('flights $700 and hotels $500');
+    expect(html).not.toContain('katex');
+    expect(html).toContain('$700');
+    expect(html).toContain('$500');
+  });
+
+  it('still renders math that starts with a digit, e.g. $2x + 3 > 0$', () => {
+    const html = renderMarkdown('Solve $2x + 3 > 0$ now.');
+    expect(html).toContain('class="katex"');
+    expect(html).not.toContain('$2x');
+  });
+
+  it('classifies each $…$ pair so a currency run never cascades into a sentence span', () => {
+    // "$2 > 0$" is math; the following "$x$" is math; the Vietnamese prose between them must NOT be
+    // swallowed into a math span (the live bug: a digit-led pair leaked over the next sentence).
+    const html = renderMarkdown('Vì $2 > 0$, nghiệm của bất phương trình là $x$ dương.');
+    expect(html.match(/class="katex"/g)?.length).toBe(2);
+    expect(html).toContain('nghiệm của bất phương trình là');
+    expect(html).not.toContain('katex">nghiệm'); // prose not rendered as math
+  });
+
+  it('does not let math break the escape-first contract (no raw script passes through)', () => {
+    const html = renderMarkdown(String.raw`$\text{<script>alert(1)</script>}$`);
+    expect(html).not.toContain('<script>');
+  });
+
+  it('renders malformed TeX without throwing', () => {
+    expect(() => renderMarkdown(String.raw`$\frac{1}{$`)).not.toThrow();
+  });
+});
