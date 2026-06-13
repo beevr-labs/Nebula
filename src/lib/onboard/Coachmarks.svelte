@@ -26,38 +26,84 @@
   let i = $state(0);
   // The live geometry of the current target (viewport coords). null → centered card, no spotlight.
   let rect = $state<{ x: number; y: number; w: number; h: number } | null>(null);
+  // The card's final on-screen corner. null → render centered (welcome/done steps, or before measure).
+  let pos = $state<{ left: number; top: number } | null>(null);
+  let cardEl = $state<HTMLDivElement | undefined>(undefined);
 
   const PAD = 8; // breathing room around the spotlight hole
+  const GAP = 14; // gap between the spotlight and the card
   const step = $derived(steps[i] ?? null);
   const isLast = $derived(i >= steps.length - 1);
 
-  function measure() {
+  const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(v, Math.max(lo, hi)));
+
+  /**
+   * Measure the current target AND place the card so it is ALWAYS fully on-screen. The card corner is
+   * computed from the preferred side, then HARD-CLAMPED into the viewport using the card's real
+   * measured size — so a target near a screen edge (e.g. the Ask box at the bottom) can never push the
+   * card off-screen where its Next/Skip buttons become unreachable (the bug this replaces).
+   */
+  function reposition() {
+    // 1. Target geometry.
     const sel = step?.selector;
-    if (!sel) {
-      rect = null;
-      return;
-    }
-    const el = document.querySelector(sel);
+    const el = sel ? document.querySelector(sel) : null;
     if (!el) {
-      rect = null; // target missing (feature hidden in this state) → fall back to a centered card
+      rect = null; // no target (or hidden in this state) → centered card, no spotlight
+      pos = null;
       return;
     }
+    // Only scroll if the target isn't already fully in view (avoids needless jumps).
     el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
     const r = el.getBoundingClientRect();
     rect = { x: r.left - PAD, y: r.top - PAD, w: r.width + PAD * 2, h: r.height + PAD * 2 };
+
+    // 2. Card placement — needs the card's real size, so this runs after it has rendered.
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const cw = cardEl?.offsetWidth ?? 320;
+    const ch = cardEl?.offsetHeight ?? 200;
+    const t = rect;
+    const corner = (side: 'top' | 'bottom' | 'left' | 'right') => {
+      if (side === 'bottom') return { left: t.x + t.w / 2 - cw / 2, top: t.y + t.h + GAP };
+      if (side === 'top') return { left: t.x + t.w / 2 - cw / 2, top: t.y - ch - GAP };
+      if (side === 'right') return { left: t.x + t.w + GAP, top: t.y + t.h / 2 - ch / 2 };
+      return { left: t.x - cw - GAP, top: t.y + t.h / 2 - ch / 2 }; // left
+    };
+    // Prefer the requested side, else the one with the most room; clamping guarantees on-screen either way.
+    const room = {
+      bottom: vh - (t.y + t.h),
+      top: t.y,
+      right: vw - (t.x + t.w),
+      left: t.x
+    };
+    const order: ('top' | 'bottom' | 'left' | 'right')[] = [
+      step?.placement ?? 'bottom',
+      'bottom',
+      'right',
+      'left',
+      'top'
+    ];
+    const needed = (s: 'top' | 'bottom' | 'left' | 'right') =>
+      s === 'top' || s === 'bottom' ? ch + GAP : cw + GAP;
+    const side = order.find((s) => room[s] >= needed(s)) ?? order[0];
+    const c = corner(side);
+    pos = {
+      left: clamp(c.left, GAP, vw - cw - GAP),
+      top: clamp(c.top, GAP, vh - ch - GAP)
+    };
   }
 
-  // Re-measure whenever the step changes (after the DOM settles) — and keep tracking on resize/scroll.
+  // Re-place whenever the step changes (after the DOM + card content settle), and on resize/scroll.
   $effect(() => {
     void i; // re-run on step change
-    void tick().then(measure);
+    void tick().then(reposition);
   });
 
   onMount(() => {
-    const onMove = () => measure();
+    const onMove = () => reposition();
     window.addEventListener('resize', onMove);
     window.addEventListener('scroll', onMove, true);
-    const id = setTimeout(measure, 60); // catch late-mounting targets (e.g. just after the gate closes)
+    const id = setTimeout(reposition, 60); // catch late-mounting targets (e.g. just after the gate closes)
     return () => {
       window.removeEventListener('resize', onMove);
       window.removeEventListener('scroll', onMove, true);
@@ -87,47 +133,6 @@
     }
   }
 
-  // ── Card placement: pick a side with room, fall back to centered ────────────────────────────────
-  const CARD_W = 320;
-  const GAP = 14;
-  const card = $derived.by(() => {
-    if (!rect) return null; // centered
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    const want = step?.placement;
-    const below = vh - (rect.y + rect.h);
-    const above = rect.y;
-    const rightRoom = vw - (rect.x + rect.w);
-    const leftRoom = rect.x;
-
-    // Default: below if there's room, else above; explicit left/right honored when feasible.
-    let place: 'top' | 'bottom' | 'left' | 'right' = 'bottom';
-    if (want === 'left' && leftRoom > CARD_W + GAP) place = 'left';
-    else if (want === 'right' && rightRoom > CARD_W + GAP) place = 'right';
-    else if (want === 'top' && above > 180) place = 'top';
-    else if (below > 180) place = 'bottom';
-    else if (above > 180) place = 'top';
-    else if (rightRoom > CARD_W + GAP) place = 'right';
-    else if (leftRoom > CARD_W + GAP) place = 'left';
-    else return null; // nowhere good → center it
-
-    let left: number, top: number;
-    if (place === 'bottom') {
-      left = rect.x + rect.w / 2 - CARD_W / 2;
-      top = rect.y + rect.h + GAP;
-    } else if (place === 'top') {
-      left = rect.x + rect.w / 2 - CARD_W / 2;
-      top = rect.y - GAP; // anchored by translateY(-100%) below
-    } else if (place === 'right') {
-      left = rect.x + rect.w + GAP;
-      top = rect.y;
-    } else {
-      left = rect.x - GAP; // anchored by translateX(-100%)
-      top = rect.y;
-    }
-    left = Math.max(GAP, Math.min(left, vw - CARD_W - GAP));
-    return { left, top, place };
-  });
 </script>
 
 <svelte:window onkeydown={onKey} />
@@ -145,13 +150,10 @@
   {/if}
 
   <div
+    bind:this={cardEl}
     class="coach-card nb-rise"
-    class:centered={!card}
-    style={card
-      ? `left:${card.left}px; top:${card.top}px;` +
-        (card.place === 'top' ? 'transform:translateY(-100%);' : '') +
-        (card.place === 'left' ? 'transform:translateX(-100%);' : '')
-      : ''}
+    class:centered={!pos}
+    style={pos ? `left:${pos.left}px; top:${pos.top}px;` : ''}
   >
     <div class="coach-step">Step {i + 1} of {steps.length}</div>
     <strong class="coach-title">{step?.title}</strong>

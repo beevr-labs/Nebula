@@ -747,6 +747,7 @@ Set the search to **trip/** and ask *"Summarize our Japan trip"* — you'll only
     entityNeighbors: (id: string, hops: number) => Promise<GraphNeighbor[]>;
     relationsAmong: (ids: string[]) => Promise<RelationEdge[]>;
     mentionsForEntity: (id: string) => Promise<{ docId: string; chunkId: string }[]>;
+    closeStore: () => Promise<void>; // release the IndexedDB handle so a full reset can delete it
     provider: {
       isCached: (m: string) => Promise<boolean>;
       deleteModel: (m: string) => Promise<void>;
@@ -977,6 +978,7 @@ Set the search to **trip/** and ask *"Summarize our Japan trip"* — you'll only
       entityNeighbors: (id, hops) => store.entityNeighbors(id, hops),
       relationsAmong: (ids) => store.relationsAmong(ids),
       mentionsForEntity: (id) => store.mentionsForEntity(id),
+      closeStore: () => store.close(),
       provider
     };
     status = 'ready';
@@ -1899,6 +1901,60 @@ Set the search to **trip/** and ask *"Summarize our Japan trip"* — you'll only
     }
   }
 
+  // --- Full reset (recovery escape hatch) -----------------------------------------------------
+  // A DESTRUCTIVE "factory reset" for when the local store gets into a bad state (a corrupt index, a
+  // half-downloaded model, an upgrade that left stale data). It wipes EVERYTHING this app persisted in
+  // the browser — notes, the search index, the knowledge graph, downloaded AI models, and settings —
+  // then reloads to a clean first-run. Guarded by a typed confirmation in the dialog (resetConfirm).
+  let resetOpen = $state(false);
+  let resetConfirm = $state(''); // user must type RESET to arm the destructive button
+  let resetting = $state(false);
+  const RESET_WORD = 'RESET';
+
+  function openResetDialog() {
+    resetConfirm = '';
+    resetOpen = true;
+  }
+  function closeResetDialog() {
+    if (resetting) return;
+    resetOpen = false;
+  }
+
+  async function resetAllData() {
+    if (resetting || resetConfirm.trim().toUpperCase() !== RESET_WORD) return;
+    resetting = true;
+    status = 'resetting…';
+    try {
+      // 1. Release the IndexedDB handle so deleteDatabase isn't blocked by the open SurrealDB engine.
+      await pipe?.closeStore().catch(() => {});
+      // 2. Drop every IndexedDB database for this origin (the SurrealDB vault + any model stores).
+      const dbs = (await indexedDB.databases?.().catch(() => [])) ?? [];
+      await Promise.all(
+        dbs.map(
+          (d) =>
+            d.name &&
+            new Promise<void>((res) => {
+              const req = indexedDB.deleteDatabase(d.name!);
+              req.onsuccess = req.onerror = req.onblocked = () => res();
+            })
+        )
+      );
+      // 3. Drop the Cache Storage entries (WebLLM + Transformers.js keep the multi-GB model weights here).
+      const cacheKeys = await caches?.keys().catch(() => [] as string[]);
+      await Promise.all((cacheKeys ?? []).map((k) => caches.delete(k)));
+      // 4. Clear this app's localStorage prefs (model pick, onboarding, theme, advanced, folders…).
+      try {
+        for (const k of Object.keys(localStorage))
+          if (k.startsWith('nebula')) localStorage.removeItem(k);
+      } catch {
+        /* storage unavailable — non-fatal */
+      }
+    } finally {
+      // 5. Reload into a clean first-run, whatever happened above (a partial wipe still wants a fresh boot).
+      location.reload();
+    }
+  }
+
   // --- File-tree mutations: context menu + folder CRUD + drag-drop (FR-NAV-002) ----
   function persistFolders() {
     emptyFolders = [...new Set(emptyFolders)].filter(Boolean).sort();
@@ -2709,6 +2765,9 @@ Set the search to **trip/** and ask *"Summarize our Japan trip"* — you'll only
         x2="10.5"
         y2="6"
       /><circle cx="8" cy="8" r="0.6" fill="currentColor" stroke="none" />
+    {:else if name === 'reset'}<path d="M12.5 5.5A5 5 0 1 0 13 9" /><polyline
+        points="12.5,2.5 12.5,5.5 9.5,5.5"
+      />
     {/if}
   </svg>
 {/snippet}
@@ -2858,6 +2917,12 @@ Set the search to **trip/** and ask *"Summarize our Japan trip"* — you'll only
           ? 'Advanced mode on — showing technical details'
           : 'Advanced mode — show technical details'}
         aria-pressed={advanced}>{@render ic('gauge', 16)}</button
+      >
+      <button
+        class="icon-btn nb-hov nb-press"
+        onclick={openResetDialog}
+        title="Reset all data — recover from a stuck model or a broken note"
+        aria-label="Reset all data">{@render ic('reset', 16)}</button
       >
       <button class="icon-btn nb-hov nb-press" onclick={toggleTheme} title="Toggle theme"
         >{@render ic(theme === 'dark' ? 'sun' : 'moon', 16)}</button
@@ -3998,6 +4063,56 @@ Set the search to **trip/** and ask *"Summarize our Japan trip"* — you'll only
           </div>
           <button class="gate-skip" onclick={closeModelGate}>Continue</button>
         {/if}
+        <div class="gate-danger">
+          <span class="dim sm">Something broken — a stuck model or a note that won’t load?</span>
+          <button class="reset-link" onclick={openResetDialog}>Reset all data…</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if resetOpen}
+    <div class="overlay center" role="presentation">
+      <div class="gate danger nb-rise" role="dialog" aria-modal="true" aria-label="Reset all data">
+        <div class="gate-head">
+          <strong class="danger-title">⚠ Reset all data?</strong>
+          <p class="dim sm">
+            This permanently <strong>erases everything Nebula stored on this device</strong> and
+            cannot be undone:
+          </p>
+        </div>
+        <ul class="reset-list">
+          <li>📝 <strong>All your notes</strong> — they live only here, not as files</li>
+          <li>🔎 the search index &amp; the knowledge graph</li>
+          <li>🤖 downloaded AI models (you’ll re-download next time)</li>
+          <li>⚙️ settings, theme, and the tour state</li>
+        </ul>
+        <div class="reset-tip">
+          💡 Want to keep your notes? <button class="link-btn" onclick={exportVault}
+            >Export your vault first</button
+          > — then come back.
+        </div>
+        <label class="reset-arm">
+          Type <strong>{RESET_WORD}</strong> to confirm:
+          <input
+            class="reset-input"
+            bind:value={resetConfirm}
+            placeholder={RESET_WORD}
+            autocomplete="off"
+            spellcheck="false"
+            disabled={resetting}
+          />
+        </label>
+        <div class="reset-actions">
+          <button class="gate-skip" onclick={closeResetDialog} disabled={resetting}>Cancel</button>
+          <button
+            class="reset-go"
+            onclick={resetAllData}
+            disabled={resetting || resetConfirm.trim().toUpperCase() !== RESET_WORD}
+          >
+            {#if resetting}<span class="spinner"></span>Erasing…{:else}Erase everything{/if}
+          </button>
+        </div>
       </div>
     </div>
   {/if}
@@ -5818,5 +5933,93 @@ Set the search to **trip/** and ask *"Summarize our Japan trip"* — you'll only
     color: var(--warn);
     font-size: 13px;
     line-height: 1.5;
+  }
+
+  /* ── Reset (danger) — the recovery escape hatch in the gate footer + its confirm dialog ── */
+  .gate-danger {
+    margin-top: 4px;
+    padding-top: 12px;
+    border-top: 1px solid var(--line);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    align-items: flex-start;
+  }
+  .reset-link {
+    border: none;
+    background: none;
+    color: #d64545;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    padding: 2px 0;
+  }
+  .reset-link:hover {
+    text-decoration: underline;
+  }
+  .gate.danger {
+    border-color: #e3a3a3;
+  }
+  .danger-title {
+    color: #c0392b;
+  }
+  .reset-list {
+    margin: 0;
+    padding: 10px 12px;
+    list-style: none;
+    border-radius: var(--r-md);
+    background: var(--warn-soft);
+    font-size: 13px;
+    line-height: 1.9;
+  }
+  .reset-tip {
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--ink-2);
+  }
+  .reset-arm {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 13px;
+    color: var(--ink-2);
+  }
+  .reset-input {
+    font: inherit;
+    padding: 8px 10px;
+    border: 1.5px solid var(--line-strong);
+    border-radius: var(--r-md);
+    background: var(--surface);
+    color: var(--ink);
+  }
+  .reset-input:focus {
+    outline: none;
+    border-color: #d64545;
+  }
+  .reset-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 2px;
+  }
+  .reset-go {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 8px 16px;
+    border-radius: var(--r-md);
+    border: none;
+    background: #d64545;
+    color: #fff;
+    cursor: pointer;
+  }
+  .reset-go:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 </style>
