@@ -42,6 +42,14 @@ export interface GraphIngestStore {
   relateEntityEdges(
     edges: { sourceId: string; targetId: string; type: string; docId: string }[]
   ): Promise<void>;
+  // Batched-across-notes variants (the vault path). The per-note methods above each became their own
+  // serialized DB round-trip, so a 100-note import paid ~600 transactions; these collapse the reads
+  // and writes of a whole import to a handful. upsertEntities/relateMentions/relateEntityEdges already
+  // take the full cross-note arrays, so they need no batched twin.
+  getGraphHashes(docIds: string[]): Promise<Map<string, string>>;
+  setGraphHashes(pairs: { docId: string; hash: string }[]): Promise<void>;
+  clearDocGraphs(docIds: string[]): Promise<void>;
+  chunkTextsForDocs(docIds: string[]): Promise<Map<string, { chunkId: string; text: string }[]>>;
 }
 
 export type IngestGraphResult =
@@ -71,6 +79,13 @@ export function graphHash(text: string): string {
 //   - the LLM pass only skips on the PLAIN hash, so `h:<hash>` never matches and every
 //     heuristic-tier note is automatically picked up for enrichment.
 export const HEURISTIC_HASH_PREFIX = 'h:';
+
+// Notes per DB flush in the batched heuristic persist. Per-note persist was ~6 serialized round-trips
+// (≈600 for 100 notes); collapsing the WHOLE import into one set of statements is fastest but a single
+// FOR-loop transaction over thousands of edges blocks the main thread (surreal-wasm runs there) and
+// freezes the UI. Slicing bounds each transaction AND yields between slices so the pane can paint —
+// the balance point: ~5 flushes for 100 notes, each a fraction of a second.
+export const FAST_PERSIST_BATCH = 20;
 
 /**
  * Extract → resolve → persist one note's entity graph. Steps:
@@ -193,16 +208,21 @@ export async function ingestVaultGraphFast(
   docs: { docId: string; text: string }[]
 ): Promise<Map<string, IngestGraphResult>> {
   const results = new Map<string, IngestGraphResult>();
-  // NOTE: no progressive "refresh the pane every N notes" callback here, deliberately. entityData()
-  // is three full-graph table scans; interleaving it with this pass's writes both CONTENDS with the
-  // SurrealDB-WASM single-writer queue and gets costlier as the graph grows — a 40-note stress
-  // import dropped from ~seconds to ~13 notes in 75s when refreshed mid-pass. The pass is fast on
-  // its own (uncontended); callers refresh ONCE when it returns. Same single-reader discipline the
-  // background index queue uses (drainIndexQueue: "refresh once, after the queue drains").
+  if (docs.length === 0) return results;
+
+  // ONE hash read for the whole import (was one per note). Notes unchanged since either tier's last
+  // pass are skipped with zero further work — never clobbering an LLM/seeded graph.
+  const stored = await store.getGraphHashes(docs.map((d) => d.docId));
+  interface Pending {
+    docId: string;
+    g: ResolvedGraph;
+    hashValue: string;
+  }
+  const pending: Pending[] = [];
   for (const d of docs) {
     const h = graphHash(d.text);
-    const stored = await store.getGraphHash(d.docId);
-    if (stored === h || stored === HEURISTIC_HASH_PREFIX + h) {
+    const s = stored.get(d.docId) ?? null;
+    if (s === h || s === HEURISTIC_HASH_PREFIX + h) {
       results.set(d.docId, { status: 'skipped' });
       continue;
     }
@@ -212,17 +232,64 @@ export async function ingestVaultGraphFast(
         results.set(d.docId, { status: 'no_graph' });
         continue;
       }
-      const entityCount = await persistResolvedGraph(
-        store,
-        d.docId,
-        d.text,
-        g,
-        HEURISTIC_HASH_PREFIX + h
-      );
-      results.set(d.docId, { status: 'ingested', entityCount });
+      pending.push({ docId: d.docId, g, hashValue: HEURISTIC_HASH_PREFIX + h });
     } catch {
       results.set(d.docId, { status: 'no_graph' }); // best-effort per note, like every graph path
     }
+  }
+  if (pending.length === 0) return results;
+  for (const p of pending)
+    results.set(p.docId, { status: 'ingested', entityCount: p.g.entities.length });
+
+  // BATCHED PERSIST in slices of FAST_PERSIST_BATCH notes: accumulate each slice's nodes/mentions/
+  // edges/hash and write it in ~5 statements (vs ~6 PER NOTE before). Slicing keeps every transaction
+  // bounded so a big import never freezes the main thread, and the awaits yield between slices so the
+  // entities pane can paint. Entity ids are canonical (same name → same id) so cross-note dedup is
+  // automatic; the idempotent UPSERT makes a name recurring across slices harmless.
+  for (let i = 0; i < pending.length; i += FAST_PERSIST_BATCH) {
+    const slice = pending.slice(i, i + FAST_PERSIST_BATCH);
+    const chunkMap = await store.chunkTextsForDocs(slice.map((p) => p.docId));
+    const entities: EntityRecord[] = [];
+    const seenEntity = new Set<string>();
+    const mentions: { chunkId: string; docId: string; entityId: string }[] = [];
+    const relations: { sourceId: string; targetId: string; type: string; docId: string }[] = [];
+    const hashPairs: { docId: string; hash: string }[] = [];
+    for (const p of slice) {
+      for (const e of p.g.entities) {
+        if (!seenEntity.has(e.id)) {
+          seenEntity.add(e.id);
+          entities.push(e);
+        }
+      }
+      const lc = (chunkMap.get(p.docId) ?? []).map((c) => ({
+        chunkId: c.chunkId,
+        text: c.text.toLowerCase()
+      }));
+      for (const e of p.g.entities) {
+        const surfaces = [e.name, ...e.aliases].map((s) => s.toLowerCase()).filter(Boolean);
+        for (const c of lc) {
+          if (surfaces.some((s) => c.text.includes(s)))
+            mentions.push({ chunkId: c.chunkId, docId: p.docId, entityId: e.id });
+        }
+      }
+      for (const r of p.g.relations) {
+        if ((r.confidence ?? 1) >= RELATION_CONFIDENCE_FLOOR)
+          relations.push({
+            sourceId: r.sourceId,
+            targetId: r.targetId,
+            type: r.type,
+            docId: p.docId
+          });
+      }
+      hashPairs.push({ docId: p.docId, hash: p.hashValue });
+    }
+    // Order mirrors persistResolvedGraph: clear → nodes → mentions → edges → hash LAST (a partial
+    // failure leaves a note un-marked so a re-run reprocesses it; every write is idempotent).
+    await store.clearDocGraphs(slice.map((p) => p.docId));
+    await store.upsertEntities(entities);
+    await store.relateMentions(mentions);
+    await store.relateEntityEdges(relations);
+    await store.setGraphHashes(hashPairs);
   }
   return results;
 }

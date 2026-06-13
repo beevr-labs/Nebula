@@ -23,7 +23,7 @@
   import type { Extraction, ExtractedRelation } from '$lib/graph/entities';
   import { buildEntityIndex, type EntityEntry } from '$lib/graph/entity-index';
   import { buildEntityGraph, type EntityGraph, type GraphNeighbor } from '$lib/graph/entity-graph';
-  import type { EntityRecord, MentionEdge, RelationEdge } from '$lib/graph/types';
+  import type { EntityRecord, RelationEdge } from '$lib/graph/types';
   import type { TextGenerator } from '$lib/ingest/autotag';
   import { resolveCitationTarget, buildHighlightSegments, answerUsage } from '$lib/chat/citation';
   import { exportVaultZip } from '$lib/vault/export';
@@ -512,6 +512,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
   let mode = $state<'ask' | 'write'>('write');
   let draftTitle = $state(new Date().toISOString().slice(0, 10));
   let draftFolder = $state('notes'); // target folder for a NEW note (FR-NOTE-007)
+  let pendingImportFolder = 'notes'; // folder the next file-import lands in (set by "Import files here")
   const EMBED_PROGRESS_MIN = 4; // only show per-chunk indexing progress past this many chunks
   let draftBody = $state('');
   let editingDocId = $state<string | null>(null); // null → creating a new note
@@ -571,7 +572,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
   // chunkId → which seed entities connect it: drives the source label + Micro-Map edge weight (ADR-029 follow-up)
   let graphShared = $state(new Map<string, { sharedCount: number; sharedEntities: string[] }>());
   let entityIndex = $state<EntityEntry[]>([]); // the Entities pane (built from persisted edges)
-  let entityRelations = $state<RelationEdge[]>([]); // all relations, for the entity graph view
+  let entityRelationCount = $state(0); // count of persisted relation edges (for the pane header)
   let selectedEntity = $state<EntityEntry | null>(null); // open entity page
   let entityGraph = $state<EntityGraph | null>(null); // multi-hop sub-graph for the selected entity
   // Interactive graph view (Phase 4): per-node drag positions + pan/zoom. Reset when a new entity opens.
@@ -681,8 +682,8 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     clearGraph: (docId: string) => Promise<void>;
     entityData: () => Promise<{
       entities: EntityRecord[];
-      mentions: MentionEdge[];
-      relations: RelationEdge[];
+      docPairs: { entityId: string; docId: string }[]; // DB-deduped (entityId, docId) — see store
+      relationCount: number;
     }>;
     entityNeighbors: (id: string, hops: number) => Promise<GraphNeighbor[]>;
     relationsAmong: (ids: string[]) => Promise<RelationEdge[]>;
@@ -906,8 +907,8 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
       clearGraph: (docId) => store.clearDocGraph(docId),
       entityData: async () => ({
         entities: await store.allEntities(),
-        mentions: await store.allMentions(),
-        relations: await store.allRelations()
+        docPairs: await store.entityDocPairs(),
+        relationCount: await store.relationCount()
       }),
       entityNeighbors: (id, hops) => store.entityNeighbors(id, hops),
       relationsAmong: (ids) => store.relationsAmong(ids),
@@ -951,8 +952,9 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
   const today = (): string => new Date().toISOString().slice(0, 10);
 
   // Multi-format ingestion (FR-ING-001/012): drop/pick PDF/CSV/TXT/MD → Markdown Proxy Note.
-  async function ingestFiles(list: FileList | null) {
+  async function ingestFiles(list: FileList | null, folder = 'notes') {
     if (!pipe || !ready || !list || list.length === 0) return;
+    const base = folder.trim() || 'notes'; // target vault folder (FR-NOTE-007) — defaults to notes/
     let queued = 0; // files that parsed OK and were handed to the background index queue
     let firstDoc = ''; // open ONE tab (the first import) at the end, not one per file
     for (const file of Array.from(list)) {
@@ -991,7 +993,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
           continue;
         }
         const stem = file.name.replace(/\.[^.]+$/, '');
-        const docId = sourcePath ? proxyNotePath(sourcePath) : `notes/${stem}.md`;
+        const docId = sourcePath ? proxyNotePath(sourcePath) : `${base}/${stem}.md`;
         const note = buildProxyNote({
           sourcePath,
           body,
@@ -1054,6 +1056,15 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     e.preventDefault();
     dropActive = false;
     void ingestFiles(e.dataTransfer?.files ?? null);
+  }
+
+  /** Open the file picker targeting `folder` (FR-NOTE-007) — the folder context-menu's "Import files
+   *  here", so a user can upload INTO a folder, not just drag-drop or import to the vault root. The
+   *  chosen folder is stashed for the input's change handler (a click can't pass arguments through). */
+  function importFilesInto(folder: string) {
+    closeCtxMenu();
+    pendingImportFolder = folder || 'notes';
+    fileInput?.click();
   }
 
   // --- Note editor (FR-NOTE-001/003, FR-UI-002) ------------------------------
@@ -1150,49 +1161,33 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     } else if (doneCount > 0)
       flashIndexed(`indexed ${doneCount === 1 ? truncate(lastName, 22) : `${doneCount} notes`}`);
 
-    // PASS 2 — entity graph in two tiers. TIER 0 first: the instant heuristic graph (proper nouns
-    // + wikilinks + co-occurrence, no model) so a saved note's entities are visible IMMEDIATELY —
-    // even with no chat model loaded. The LLM tier below then enriches (typed relations,
-    // concepts) when a model is available; without one, the heuristic graph stands and the vault
-    // is flagged stale so the enrich is offered.
-    let missedGraph = false; // a note not yet LLM-enriched (no model) → graph behind
+    // PASS 2 — entity graph, heuristic ONLY (proper nouns + wikilinks + co-occurrence, no model) so
+    // a saved note's entities are visible IMMEDIATELY. The LLM enrichment tier was removed: it cost
+    // 20–84s/note for ZERO parseable output on a reasoning chat model, and retrieval never read its
+    // typed relations — this pass is ~0.1ms/note and feeds the same retrieval/viz path.
     let entSum = 0;
     if (graphJobs.length) {
+      graphBuilding = graphJobs.length;
       try {
         const fast = await pipe.indexGraphFast(
           graphJobs.map((j) => ({ docId: j.docId, text: j.body }))
         );
-        // ONE refresh after the instant pass (not per-note) — a mid-pass refresh's full-graph read
-        // contends with the queue's writes (the same reason the LLM tier refreshes only on drain).
-        if ([...fast.values()].some((r) => r.status === 'ingested')) await refreshEntities();
+        // ONE refresh after the pass (not per-note) — a mid-pass refresh's full-graph read contends
+        // with the queue's writes, so tally entities and refresh just once when it settles.
+        for (const r of fast.values()) if (r.status === 'ingested') entSum += r.entityCount;
+        if (entSum > 0) await refreshEntities();
       } catch {
-        /* instant tier is best-effort too — the LLM tier below still runs */
+        /* the heuristic graph is best-effort; the note stays searchable regardless */
       }
-    }
-    graphBuilding = graphJobs.length;
-    for (const job of graphJobs) {
-      try {
-        const ents = await pipe.indexGraph(job.docId, job.body);
-        if (ents === -2) missedGraph = true;
-        if (ents > 0) entSum += ents;
-      } catch {
-        /* graph extraction is best-effort; the note stays searchable regardless */
-      }
-      graphBuilding = Math.max(0, graphBuilding - 1);
+      graphBuilding = 0;
     }
     indexRunning = false;
     if (entSum > 0)
       flashIndexed(`graph updated · ${entSum} ${entSum === 1 ? 'entity' : 'entities'}`);
     await refreshEntities(); // once, after the queue drains — never per-job (avoids the read/write race)
-    // If extraction ran (a model was loaded), the graph is current — clear any prior stale flag and
-    // refresh the open entity canvas so a new note's entities show without a manual rebuild. If it
-    // couldn't run (no model), flag the graph stale so the Entities pane prompts a build (FR-GRAPH-001).
-    if (missedGraph) {
-      graphStale = true;
-    } else {
-      graphStale = false;
-      if (rightView === 'graph' && selectedEntity) await openEntity(selectedEntity);
-    }
+    // The heuristic graph is the whole graph now — a save is never "behind" waiting on a model.
+    graphStale = false;
+    if (rightView === 'graph' && selectedEntity) await openEntity(selectedEntity);
     // New saves can arrive during the (slow) graph pass — drain them now that we've released the lock.
     if (indexJobs.length) void drainIndexQueue();
   }
@@ -1202,8 +1197,8 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     if (!pipe) return;
     try {
       const data = await pipe.entityData();
-      entityIndex = buildEntityIndex(data.entities, data.mentions);
-      entityRelations = data.relations;
+      entityIndex = buildEntityIndex(data.entities, data.docPairs);
+      entityRelationCount = data.relationCount;
     } catch {
       /* graph is best-effort; an empty pane is fine */
     }
@@ -1321,13 +1316,13 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
   }
 
   /**
-   * One-click vault graph, two tiers:
-   *   PHASE 1 — INSTANT (no model): proper nouns + wikilinks + co-occurrence edges land in
-   *     milliseconds, so the Entities pane / graph lens populate immediately on click.
-   *   PHASE 2 — ENRICH (LLM, loads the model if needed): batched extraction upgrades those notes
-   *     to typed relations + concept entities. The heuristic hash marker makes the LLM pass pick
-   *     up exactly the tier-0 notes; declining the model load keeps the instant graph and flags
-   *     graphStale so the upgrade is offered again later.
+   * One-click vault graph — heuristic ONLY, no chat model. Proper nouns + wikilinks + co-occurrence
+   * edges land in milliseconds and feed the same resolve→persist→retrieval/viz path the LLM tier
+   * used to. The LLM enrichment pass was REMOVED: measured on real Vietnamese notes, the default
+   * reasoning chat model produced ZERO parseable entities at 20–84s/note (it burns the whole token
+   * budget inside <think> before emitting any JSON), whereas this pass is ~0.1ms/note. Retrieval
+   * never read the typed relations anyway (entityAnchorDocs/restrictToEntities key on mentions +
+   * co-occurrence), so dropping the LLM costs the graph nothing a user can retrieve on.
    */
   async function buildVaultGraph() {
     if (!pipe || graphBusy) return;
@@ -1336,47 +1331,14 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
       const todo = vault.filter((n) => n.docId !== TOUR_DOC); // tour note never joins the graph
       const docs = todo.map((n) => ({ docId: n.docId, text: n.text }));
 
-      // PHASE 1 — entities appear NOW, before any model is even loaded. The instant pass is fast
-      // when uncontended; refresh the pane ONCE when it returns (a mid-pass refresh contends with
-      // its writes and balloons as the graph grows — see ingestVaultGraphFast's note).
+      // Refresh the pane ONCE when the pass returns (a mid-pass refresh contends with its writes and
+      // balloons as the graph grows — see ingestVaultGraphFast's note).
       status = 'building graph…';
       const fast = await pipe.indexGraphFast(docs);
       const fastIngested = [...fast.values()].filter((r) => r.status === 'ingested').length;
       if (fastIngested > 0) await refreshEntities();
-      status = `graph ready · ${entityIndex.length} entities — enriching with the model…`;
-
-      if (!loadedModel) {
-        const ok = await ensureModelLoaded(modelId);
-        if (!ok) {
-          // No model — the instant graph stands; mark it behind so the enrich is re-offered.
-          graphStale = true;
-          status = `graph ready · ${entityIndex.length} entities (instant pass — load a model to enrich)`;
-          if (rightView === 'graph' && !selectedEntity && entityIndex.length)
-            void openEntity(entityIndex[0]);
-          return;
-        }
-      }
-
-      // PHASE 2 — batched LLM enrichment (ingestVaultGraph): short notes packed several-per-call,
-      // long notes segmented solo, plain-hash notes skip. Progressive: after each settled batch
-      // the status ticks and — when new entities landed — the pane refreshes.
-      let extracted = 0;
-      let skipped = 0;
-      let lastRefreshed = 0;
-      await pipe.indexGraphVault(docs, async (p) => {
-        extracted = p.extracted;
-        skipped = p.skipped;
-        if (p.label) status = `enriching entities: ${shortName(p.label)} (${p.done}/${p.total})…`;
-        if (p.extracted > lastRefreshed) {
-          lastRefreshed = p.extracted;
-          await refreshEntities();
-        }
-      });
-      await refreshEntities();
-      graphStale = false; // the whole vault was just (re)extracted — nothing is behind anymore
-      status =
-        `graph ready · ${entityIndex.length} entities · ${extracted} enriched` +
-        (skipped ? `, ${skipped} unchanged (skipped)` : '');
+      graphStale = false; // the heuristic graph IS the graph — nothing is ever "behind" a model now
+      status = `graph ready · ${entityIndex.length} entities`;
       // If the user is looking at the Graph tab, open the top entity so the node-link map appears
       // right away rather than leaving an empty "pick an entity" canvas after a build.
       if (rightView === 'graph' && !selectedEntity && entityIndex.length)
@@ -2965,7 +2927,7 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
           <span class="lens-ic accent">{@render ic('graph', 18)}</span>
           <span class="lens-title">Graph lens</span>
           <span class="lens-sub"
-            >{entityIndex.length} entities · {entityRelations.length} relations</span
+            >{entityIndex.length} entities · {entityRelationCount} relations</span
           >
           <span class="spacer"></span>
           {#if entityIndex.length}<span class="pill ok-pill"
@@ -3534,7 +3496,11 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
     multiple
     accept=".pdf,.csv,.txt,.md,.markdown,.text"
     bind:this={fileInput}
-    onchange={(e) => ingestFiles(e.currentTarget.files)}
+    onchange={(e) => {
+      const folder = pendingImportFolder;
+      pendingImportFolder = 'notes'; // reset so the next plain "Import files" lands in the vault root
+      void ingestFiles(e.currentTarget.files, folder);
+    }}
   />
 
   <!-- ───────── OVERLAYS ───────── -->
@@ -3829,6 +3795,11 @@ Set **Scope → trip/** and ask *"Summarize our Japan trip"* — you'll only eve
           class="ctx-item nb-hov"
           role="menuitem"
           onclick={() => newNoteIn(ctxMenu?.path ?? 'notes')}>New note here</button
+        >
+        <button
+          class="ctx-item nb-hov"
+          role="menuitem"
+          onclick={() => importFilesInto(ctxMenu?.path ?? 'notes')}>Import files here</button
         >
         <button
           class="ctx-item nb-hov"

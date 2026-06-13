@@ -144,7 +144,15 @@ function fakeStore() {
     upsertEntities: async (es) => void entities.set(`call${entities.size}`, es),
     chunkTextsForDoc: async (docId) => [{ chunkId: `${docId}#0`, text: texts.get(docId) ?? '' }],
     relateMentions: async (edges) => void mentions.push(...edges),
-    relateEntityEdges: async () => {}
+    relateEntityEdges: async () => {},
+    getGraphHashes: async (ids) =>
+      new Map(
+        ids.flatMap((id) => (hashes.has(id) ? [[id, hashes.get(id)!] as [string, string]] : []))
+      ),
+    setGraphHashes: async (ps) => ps.forEach((p) => hashes.set(p.docId, p.hash)),
+    clearDocGraphs: async () => {},
+    chunkTextsForDocs: async (ids) =>
+      new Map(ids.map((id) => [id, [{ chunkId: `${id}#0`, text: texts.get(id) ?? '' }]]))
   };
   const texts = new Map<string, string>();
   return { store, hashes, mentions, texts };

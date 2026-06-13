@@ -5,6 +5,7 @@ import {
   ingestVaultGraph,
   graphHash,
   HEURISTIC_HASH_PREFIX,
+  FAST_PERSIST_BATCH,
   type GraphIngestStore
 } from '../../src/lib/graph/ingest-graph';
 import type { TextGenerator } from '../../src/lib/ingest/autotag';
@@ -48,6 +49,25 @@ describe('extractHeuristic — entities', () => {
     const got = names("Sơn Tùng M-TP met O'Brien at the show. Cùng O'Brien diễn.");
     expect(got).toContain('Sơn Tùng M-TP');
     expect(got).toContain("O'Brien");
+  });
+
+  it('drops Vietnamese common/structural heads ("Điểm", "Tổng") but keeps real names beside them', () => {
+    const got = names(
+      'Điểm mạnh của Cảng Vĩnh Triều rất rõ. Tổng kết: Cảng Vĩnh Triều đạt 8 Điểm. Tổng chi phí thấp.'
+    );
+    expect(got).toContain('Cảng Vĩnh Triều');
+    expect(got).not.toContain('Điểm');
+    expect(got).not.toContain('Tổng');
+  });
+
+  it('drops a de-accented all-common multi-word header but keeps a distinctive run', () => {
+    const got = names('Bao cao Doanh Thu. Doanh Thu cua Tan Luc tang. Tan Luc dat ky luc.');
+    expect(got).not.toContain('Doanh Thu');
+    expect(got).toContain('Tan Luc');
+  });
+
+  it('drops a lone single capitalized letter ("C") even mid-sentence', () => {
+    expect(names('Hạng C tốt. Đạt hạng C lần nữa.')).not.toContain('C');
   });
 
   it('clamps entity count and pronouns never survive resolution downstream', () => {
@@ -95,7 +115,15 @@ function fakeStore() {
     upsertEntities: async (_es: EntityRecord[]) => {},
     chunkTextsForDoc: async (docId) => [{ chunkId: `${docId}#0`, text: texts.get(docId) ?? '' }],
     relateMentions: async () => {},
-    relateEntityEdges: async () => {}
+    relateEntityEdges: async () => {},
+    getGraphHashes: async (ids) =>
+      new Map(
+        ids.flatMap((id) => (hashes.has(id) ? [[id, hashes.get(id)!] as [string, string]] : []))
+      ),
+    setGraphHashes: async (ps) => ps.forEach((p) => hashes.set(p.docId, p.hash)),
+    clearDocGraphs: async () => {},
+    chunkTextsForDocs: async (ids) =>
+      new Map(ids.map((id) => [id, [{ chunkId: `${id}#0`, text: texts.get(id) ?? '' }]]))
   };
   return { store, hashes, texts };
 }
@@ -152,5 +180,51 @@ describe('ingestVaultGraphFast — tier-0 pass', () => {
     expect([...results.values()].every((r) => r.status === 'ingested')).toBe(true);
     expect(hashes.get('d0')).toBe(HEURISTIC_HASH_PREFIX + graphHash(docs[0].text));
     expect(hashes.get('d19')).toBe(HEURISTIC_HASH_PREFIX + graphHash(docs[19].text));
+  });
+
+  it('BATCHES every write across the whole import (one DB round-trip per write type, not per note)', async () => {
+    // The perf fix: a 50-note import must not pay ~6 serialized writes per note. Count store calls.
+    const hashes = new Map<string, string>();
+    const calls = {
+      clear: 0,
+      upsert: 0,
+      mentions: 0,
+      edges: 0,
+      setHash: 0,
+      hashRead: 0,
+      chunkRead: 0
+    };
+    const store: GraphIngestStore = {
+      getGraphHash: async () => null,
+      setGraphHash: async () => void calls.setHash++,
+      clearDocGraph: async () => void calls.clear++,
+      upsertEntities: async () => void calls.upsert++,
+      chunkTextsForDoc: async () => [],
+      relateMentions: async () => void calls.mentions++,
+      relateEntityEdges: async () => void calls.edges++,
+      getGraphHashes: async () => (calls.hashRead++, new Map()),
+      setGraphHashes: async () => void calls.setHash++,
+      clearDocGraphs: async () => void calls.clear++,
+      chunkTextsForDocs: async (ids) => (calls.chunkRead++, new Map(ids.map((id) => [id, []])))
+    };
+    const N = 50;
+    const docs = Array.from({ length: N }, (_, i) => ({
+      docId: `d${i}`,
+      text: `Công ty Vinamilk hợp tác với Đà Nẵng trong dự án Mercury ${i}.`
+    }));
+    await ingestVaultGraphFast(store, docs);
+    // ONE hash read for the whole import; the writes flush once per FAST_PERSIST_BATCH-note slice —
+    // a few round-trips for 50 notes, NEVER the ~6-per-note (≈300) the single methods would cost.
+    const slices = Math.ceil(N / FAST_PERSIST_BATCH);
+    expect(calls).toEqual({
+      clear: slices,
+      upsert: slices,
+      mentions: slices,
+      edges: slices,
+      setHash: slices,
+      hashRead: 1,
+      chunkRead: slices
+    });
+    expect(slices).toBeLessThan(N); // the point: not per-note
   });
 });

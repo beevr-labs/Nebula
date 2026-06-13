@@ -28,6 +28,40 @@ const CAP_RUN = /\p{Lu}[\p{L}\p{N}'’-]*(?: \p{Lu}[\p{L}\p{N}'’-]*)*/gu;
 
 const ACRONYM = /^[\p{Lu}\p{N}]{2,6}$/u;
 
+// Diacritic-fold + lowercase (local copy of retrieval/search's, kept here so this tier-0 module stays
+// self-contained). Lets the common-word filter match "Điểm" and a de-accented "Diem" alike.
+function fold(s: string): string {
+  return s.normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/đ/g, 'd').replace(/Đ/g, 'D').toLowerCase();
+}
+
+// Vietnamese common / document-structure words that surface as FALSE single-word entities. A VN
+// common-noun phrase capitalizes only its FIRST syllable ("Báo cáo", "Biên bản", "Điểm mạnh"), so
+// CAP_RUN grabs that lone capitalized head ("Báo", "Biên", "Điểm") and the mid-sentence rule can't
+// tell it from a name — on a vault of reports/minutes these dominated the graph ("Điểm"/"Tổng" alone
+// hit ~88% of notes). Section labels ("Tổng:", "Mục", "STT") do the same. Stored diacritic-FOLDED;
+// applied to single-word candidates and to multi-word runs only when EVERY word is one of these (a
+// de-accented table header like "Doanh Thu"/"Loi Nhuan"). A run with any distinctive word ("Hà Nội",
+// "Cảng Vĩnh Triều") is untouched, and wikilinks/acronyms always survive. prettier-ignore below keeps
+// the word list dense and scannable.
+const COMMON_WORDS = new Set([
+  // section labels & structure
+  'diem', 'tong', 'muc', 'bang', 'stt', 'ngay', 'thang', 'nam', 'ghi', 'ket', 'luan', 'noi', 'dung',
+  'phan', 'chuong', 'tieu', 'hinh', 'anh', 'bieu', 'phu', 'luc', 'trang', 'loai', 'ten', 'gia', 'tri', 'so',
+  // report / title heads & common business nouns (first syllable of 2-syllable terms)
+  'bao', 'cao', 'bien', 'ban', 'nghien', 'cuu', 'thiet', 'huong', 'dan', 'quy', 'hoach', 'danh', 'sach',
+  'thong', 'tin', 'cong', 'chinh', 'hien', 'thoi', 'gian', 'chuc', 'tich', 'tai', 'lieu', 'quan', 'hop',
+  'doanh', 'thu', 'loi', 'nhuan', 'chi', 'nhanh', 'von', 'tang', 'truong', 'qua', 'mo', 'dau'
+]); // prettier-ignore
+
+/** True when a candidate is a FALSE proper noun by the VN-common-word rule: a lone single character
+ *  ("C", "A"), or a run whose every word folds to a COMMON_WORDS entry. A run with any distinctive
+ *  word returns false, so real multi-word names are never touched. */
+function isCommonOnly(name: string): boolean {
+  if (name.length === 1) return true; // a single letter is never a useful entity
+  const words = name.split(/[- ]+/).filter(Boolean);
+  return words.length > 0 && words.every((w) => COMMON_WORDS.has(fold(w)));
+}
+
 // Sentence-case nibbler: when a capitalized run STARTS a sentence, its first word may be ordinary
 // sentence case fused onto a real name ("Met Jane Smith…", "Gặp Thiên Nguyễn…"). These common
 // English/Vietnamese sentence-openers are peeled off the FRONT of sentence-initial runs only —
@@ -124,9 +158,15 @@ export function extractHeuristic(text: string): Extraction {
   // is ambiguous, "…to Hanoi" proves it) so sentence-starters ("Hôm", "The") never become nodes.
   const kept = new Set<string>();
   for (const c of cands.values()) {
-    if (c.multiWord || c.midSentence || ACRONYM.test(c.name)) kept.add(c.name);
+    if (ACRONYM.test(c.name)) {
+      kept.add(c.name); // ALL-CAPS acronym — real even if it happens to fold to a common word
+      continue;
+    }
+    if (!(c.multiWord || c.midSentence)) continue;
+    if (isCommonOnly(c.name)) continue; // VN structural/common head ("Điểm", "Tổng", "Doanh Thu")
+    kept.add(c.name);
   }
-  for (const t of wikilinkTargets(text)) kept.add(t);
+  for (const t of wikilinkTargets(text)) kept.add(t); // user-authored — always trusted
 
   // Rank by frequency (then first-seen via Map order) and clamp.
   const counted = [...kept].map((name) => ({ name, count: cands.get(name)?.count ?? 1 }));

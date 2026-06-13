@@ -19,7 +19,11 @@ export interface EntityEntry {
  * distinct-doc count and the docIds, sorted by descending count then name. Entities with zero
  * mentions (orphaned after a doc delete) are omitted — they're noise, not navigation.
  */
-export function buildEntityIndex(entities: EntityRecord[], mentions: MentionEdge[]): EntityEntry[] {
+export function buildEntityIndex(
+  entities: EntityRecord[],
+  // Only (entityId, docId) is read — accept the lean DB-deduped pairs OR full MentionEdge rows.
+  mentions: Pick<MentionEdge, 'entityId' | 'docId'>[]
+): EntityEntry[] {
   const docsByEntity = new Map<string, Set<string>>();
   for (const m of mentions) {
     if (!docsByEntity.has(m.entityId)) docsByEntity.set(m.entityId, new Set());

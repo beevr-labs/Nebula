@@ -62,6 +62,11 @@ export interface GraphRagResult {
   entityIds: string[]; // the entities the seeds mention (what the expansion hung off)
 }
 
+// Max items per graph-write statement. A single SurrealDB-WASM FOR-loop transaction over an unbounded
+// array (a dense import's tens of thousands of mention edges) runs on the main thread and freezes the
+// UI for seconds; slicing keeps each write short and lets the event loop breathe between them.
+const DB_WRITE_BATCH = 500;
+
 export class VectorStore {
   private db: Surreal | null = null;
 
@@ -150,26 +155,31 @@ export class VectorStore {
    * "indexing…" stall after every save), while the embedding itself was near-instant.
    */
   async upsertChunks(records: ChunkRecord[]): Promise<void> {
-    if (records.length === 0) return;
-    await this.q(
-      // `textFold` = diacritic-folded text for accent-insensitive lexical recall (lexicalSearch). Stored
-      // at write time so the in-DB substring scan can match "Hoa Phong" for a "Hoả Phong" query.
-      `FOR $r IN $records {
-         UPSERT type::thing("chunk", $r.cid) CONTENT { chunkId: $r.cid, docId: $r.docId, text: $r.text, textFold: $r.tf, page: $r.page, charStart: $r.cs, charEnd: $r.ce, embedding: $r.emb };
-       }`,
-      {
-        records: records.map((r) => ({
-          cid: r.chunkId,
-          docId: r.docId,
-          text: r.text,
-          tf: foldDiacritics(r.text),
-          page: r.page ?? null,
-          cs: r.charStart,
-          ce: r.charEnd,
-          emb: r.embedding
-        }))
-      }
-    );
+    // Chunked at DB_WRITE_BATCH: a single 671KB note is ~3400 chunks, and one statement upserting all
+    // of them (each with a 384-float embedding) is a multi-second main-thread WASM transaction; bounded
+    // slices keep each write short and let the UI breathe between them.
+    for (let i = 0; i < records.length; i += DB_WRITE_BATCH) {
+      const slice = records.slice(i, i + DB_WRITE_BATCH);
+      await this.q(
+        // `textFold` = diacritic-folded text for accent-insensitive lexical recall (lexicalSearch). Stored
+        // at write time so the in-DB substring scan can match "Hoa Phong" for a "Hoả Phong" query.
+        `FOR $r IN $records {
+           UPSERT type::thing("chunk", $r.cid) CONTENT { chunkId: $r.cid, docId: $r.docId, text: $r.text, textFold: $r.tf, page: $r.page, charStart: $r.cs, charEnd: $r.ce, embedding: $r.emb };
+         }`,
+        {
+          records: slice.map((r) => ({
+            cid: r.chunkId,
+            docId: r.docId,
+            text: r.text,
+            tf: foldDiacritics(r.text),
+            page: r.page ?? null,
+            cs: r.charStart,
+            ce: r.charEnd,
+            emb: r.embedding
+          }))
+        }
+      );
+    }
   }
 
   /** Cosine top-K KNN over the HNSW index (FR-RET-001). Returns hits in descending score. */
@@ -250,6 +260,25 @@ export class VectorStore {
       { docId }
     );
     return rows ?? [];
+  }
+
+  /** Chunk ids + text for MANY docs in ONE read, grouped by docId — the batched-graph path's read.
+   *  Per-doc `chunkTextsForDoc` over a 100-note import was 100 serialized round-trips; this is one. */
+  async chunkTextsForDocs(
+    docIds: string[]
+  ): Promise<Map<string, { chunkId: string; text: string }[]>> {
+    const out = new Map<string, { chunkId: string; text: string }[]>();
+    if (docIds.length === 0) return out;
+    const [rows] = await this.q<[{ chunkId: string; text: string; docId: string }[]]>(
+      'SELECT chunkId, text, docId FROM chunk WHERE docId IN $ids',
+      { ids: docIds }
+    );
+    for (const r of rows ?? []) {
+      const arr = out.get(r.docId);
+      if (arr) arr.push({ chunkId: r.chunkId, text: r.text });
+      else out.set(r.docId, [{ chunkId: r.chunkId, text: r.text }]);
+    }
+    return out;
   }
 
   /**
@@ -359,15 +388,21 @@ export class VectorStore {
   // carries the `docId` that asserted it, for provenance (verifiable answers) and scoped cleanup.
 
   /** Upsert entity nodes keyed by canonical id (idempotent; last write wins on name/aliases).
-   *  Whole batch in one statement — a note's 20 entities used to be 20 serialized round-trips. */
+   *  Chunked at DB_WRITE_BATCH so one statement never RELATEs/UPSERTs an unbounded array — a dense
+   *  bulk import (entities × thousands of repeating chunks) would otherwise be a single multi-second
+   *  WASM transaction that blocks the main thread; bounded slices keep each write short + yield. */
   async upsertEntities(es: EntityRecord[]): Promise<void> {
-    if (es.length === 0) return;
-    await this.q(
-      `FOR $e IN $es {
-         UPSERT type::thing("entity", $e.id) CONTENT { entityId: $e.id, name: $e.name, type: $e.type, aliases: $e.aliases };
-       }`,
-      { es: es.map((e) => ({ id: e.id, name: e.name, type: e.type, aliases: e.aliases ?? [] })) }
-    );
+    for (let i = 0; i < es.length; i += DB_WRITE_BATCH) {
+      const slice = es.slice(i, i + DB_WRITE_BATCH);
+      await this.q(
+        `FOR $e IN $es {
+           UPSERT type::thing("entity", $e.id) CONTENT { entityId: $e.id, name: $e.name, type: $e.type, aliases: $e.aliases };
+         }`,
+        {
+          es: slice.map((e) => ({ id: e.id, name: e.name, type: e.type, aliases: e.aliases ?? [] }))
+        }
+      );
+    }
   }
 
   /** Single-entity convenience over the batch path. */
@@ -376,17 +411,20 @@ export class VectorStore {
   }
 
   /** Record chunk→entity mention edges, tagged with their doc (provenance + scoped cleanup).
-   *  One statement for all of a note's mentions — the hottest edge type (entities × chunks). */
+   *  The hottest edge type (entities × chunks) — chunked at DB_WRITE_BATCH so a dense import's tens of
+   *  thousands of mentions don't become one main-thread-freezing transaction. */
   async relateMentions(edges: MentionEdge[]): Promise<void> {
-    if (edges.length === 0) return;
-    await this.q(
-      `FOR $m IN $ms {
-         LET $c = type::thing("chunk", $m.chunkId);
-         LET $e = type::thing("entity", $m.entityId);
-         RELATE $c->mentions->$e SET docId = $m.docId;
-       }`,
-      { ms: edges.map((m) => ({ chunkId: m.chunkId, entityId: m.entityId, docId: m.docId })) }
-    );
+    for (let i = 0; i < edges.length; i += DB_WRITE_BATCH) {
+      const slice = edges.slice(i, i + DB_WRITE_BATCH);
+      await this.q(
+        `FOR $m IN $ms {
+           LET $c = type::thing("chunk", $m.chunkId);
+           LET $e = type::thing("entity", $m.entityId);
+           RELATE $c->mentions->$e SET docId = $m.docId;
+         }`,
+        { ms: slice.map((m) => ({ chunkId: m.chunkId, entityId: m.entityId, docId: m.docId })) }
+      );
+    }
   }
 
   /** Single-mention convenience over the batch path. */
@@ -398,15 +436,17 @@ export class VectorStore {
   async relateEntityEdges(
     edges: { sourceId: string; targetId: string; type: string; docId: string }[]
   ): Promise<void> {
-    if (edges.length === 0) return;
-    await this.q(
-      `FOR $r IN $rs {
-         LET $s = type::thing("entity", $r.sourceId);
-         LET $t = type::thing("entity", $r.targetId);
-         RELATE $s->relates->$t SET type = $r.type, docId = $r.docId;
-       }`,
-      { rs: edges }
-    );
+    for (let i = 0; i < edges.length; i += DB_WRITE_BATCH) {
+      const slice = edges.slice(i, i + DB_WRITE_BATCH);
+      await this.q(
+        `FOR $r IN $rs {
+           LET $s = type::thing("entity", $r.sourceId);
+           LET $t = type::thing("entity", $r.targetId);
+           RELATE $s->relates->$t SET type = $r.type, docId = $r.docId;
+         }`,
+        { rs: slice }
+      );
+    }
   }
 
   /** Single-relation convenience over the batch path. */
@@ -431,6 +471,15 @@ export class VectorStore {
     );
   }
 
+  /** Clear the graph edges of MANY docs in ONE statement — the batched re-ingest path. */
+  async clearDocGraphs(docIds: string[]): Promise<void> {
+    if (docIds.length === 0) return;
+    await this.q(
+      'DELETE mentions WHERE docId IN $ids; DELETE relates WHERE docId IN $ids; DELETE graphmeta WHERE docId IN $ids;',
+      { ids: docIds }
+    );
+  }
+
   /**
    * Incremental-extraction guard (perf): the content hash of the text last extracted into the graph
    * for `docId`. A rebuild compares it to the current text and SKIPS the (expensive) LLM extraction
@@ -445,12 +494,33 @@ export class VectorStore {
     return rows?.[0]?.hash ?? null;
   }
 
+  /** Graph hashes for MANY docs in ONE read, as a docId→hash map (absent docs simply omitted). */
+  async getGraphHashes(docIds: string[]): Promise<Map<string, string>> {
+    if (docIds.length === 0) return new Map();
+    const [rows] = await this.q<[{ docId: string; hash: string }[]]>(
+      'SELECT docId, hash FROM graphmeta WHERE docId IN $ids',
+      { ids: docIds }
+    );
+    return new Map((rows ?? []).map((r) => [r.docId, r.hash]));
+  }
+
   /** Record the content hash extracted for a doc (set after a successful extraction). */
   async setGraphHash(docId: string, hash: string): Promise<void> {
     await this.q('UPSERT type::thing("graphmeta", $id) CONTENT { docId: $id, hash: $hash }', {
       id: docId,
       hash
     });
+  }
+
+  /** Record content hashes for MANY docs in ONE statement — the batched-graph path's final mark. */
+  async setGraphHashes(pairs: { docId: string; hash: string }[]): Promise<void> {
+    if (pairs.length === 0) return;
+    await this.q(
+      `FOR $p IN $ps {
+         UPSERT type::thing("graphmeta", $p.docId) CONTENT { docId: $p.docId, hash: $p.hash };
+       }`,
+      { ps: pairs }
+    );
   }
 
   /** All entity nodes (for the entities pane / pure index builders). */
@@ -487,6 +557,23 @@ export class VectorStore {
         type: r.type,
         docId: r.docId ?? undefined
       }));
+  }
+
+  /** DISTINCT (entityId, docId) mention pairs — the ONLY shape the entities pane needs (it counts
+   *  distinct docs per entity). Deduping in the DB instead of fetching every entity×chunk edge and
+   *  deduping in JS collapses a note that names an entity across 3400 chunks from 3400 rows to ONE —
+   *  the heavy `allMentions` scan was what made refreshEntities block on a large graph. */
+  async entityDocPairs(): Promise<{ entityId: string; docId: string }[]> {
+    const [rows] = await this.q<[{ entityId: string; docId: string }[]]>(
+      'SELECT out.entityId AS entityId, docId FROM mentions GROUP BY entityId, docId'
+    );
+    return (rows ?? []).filter((r) => r.entityId && r.docId);
+  }
+
+  /** Count of relation edges — the entities pane shows the number, not the rows, so don't fetch them. */
+  async relationCount(): Promise<number> {
+    const [rows] = await this.q<[{ c: number }[]]>('SELECT count() AS c FROM relates GROUP ALL');
+    return rows?.[0]?.c ?? 0;
   }
 
   /** The distinct docIds that mention an entity (its provenance / "backlinks"). */
