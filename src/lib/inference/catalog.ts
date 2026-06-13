@@ -139,6 +139,13 @@ export function modelById(id: string): ChatModel | undefined {
   return CHAT_MODELS.find((m) => m.id === id);
 }
 
+/** Reasoning models (Qwen3, DeepSeek-R1) emit a long <think> block before the answer, so they need a
+ *  bigger token budget — at the terse grounded cap they can spend the whole budget thinking and never
+ *  write the final answer (the answerFellBack case). Used to widen grounded generation for them. */
+export function isReasoningModel(id: string): boolean {
+  return /qwen3|deepseek-r1/i.test(id);
+}
+
 /** Human-readable size: GB for ≥1000 MB, else MB. */
 export function formatSize(mb: number): string {
   return mb >= 1000 ? `${(mb / 1000).toFixed(1)} GB` : `${mb} MB`;

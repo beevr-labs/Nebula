@@ -139,7 +139,7 @@ export const vi: Dict = {
     'Nebula biến ghi chú của bạn thành thứ bạn có thể đặt câu hỏi — và mọi thứ chạy ngay trên máy bạn. Không gì được tải lên mạng. Đây là bốn điều đáng biết.',
   'tour.ask.title': 'Hỏi ghi chú của bạn bất cứ điều gì',
   'tour.ask.body':
-    'Gõ câu hỏi vào đây — ví dụ “Tổng ngân sách chuyến đi là bao nhiêu?” — Nebula trả lời dựa trên chính ghi chú của bạn, kèm liên kết về nơi tìm thấy mỗi thông tin. Nhấn ⌘J để nhảy tới đây bất cứ lúc nào.',
+    'Gõ câu hỏi vào đây — ví dụ “Maya, Leo và Priya mỗi người muốn làm gì ở Nhật?” — Nebula trả lời dựa trên chính ghi chú của bạn, kèm liên kết về nơi tìm thấy mỗi thông tin. Nhấn ⌘J để nhảy tới đây bất cứ lúc nào.',
   'tour.modes.title': 'Hai cách trả lời',
   'tour.modes.body':
     '“Chỉ trích ghi chú” bám sát đúng những gì bạn viết. “Suy luận giúp tôi” cho phép trợ lý suy luận và đưa lời khuyên. Chọn cách phù hợp với câu hỏi của bạn.',

@@ -140,7 +140,7 @@ export const en: Dict = {
     'Nebula turns your notes into something you can ask questions about — and everything runs right here on your device. Nothing is ever uploaded. Here are the four things worth knowing.',
   'tour.ask.title': 'Ask your notes anything',
   'tour.ask.body':
-    'Type a question here — like “What’s the total budget for the trip?” — and Nebula answers using your own notes, with links back to where it found each fact. Press ⌘J to jump here anytime.',
+    'Type a question here — like “What do Maya, Leo and Priya each want to do in Japan?” — and Nebula answers using your own notes, with links back to where it found each fact. Press ⌘J to jump here anytime.',
   'tour.modes.title': 'Two ways to answer',
   'tour.modes.body':
     '“Just quote my notes” sticks strictly to what you wrote. “Think it through” lets the assistant reason and give advice. Pick whichever fits your question.',

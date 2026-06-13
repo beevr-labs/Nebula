@@ -40,6 +40,7 @@
     needsOomAck,
     modelById,
     recommendModel,
+    isReasoningModel,
     type HardwareHint
   } from '$lib/inference/catalog';
   import { createNote, updateNote, renameNote, moveNotePath } from '$lib/vault/note-crud';
@@ -145,19 +146,19 @@ Nebula turns your notes into something you can **ask** — and everything runs *
 This demo has two little notebooks so you can see what it does: a **Japan trip** with friends (\`trip/\`) and a **sleep research** notebook (\`research/\`). Try the things below, then delete it all and make it your own.
 
 ## 1 · Ask your notes  (press ⌘J)
-- **Synthesize across notes:** *"What does each friend want to do in Japan?"*
-- **Add up the numbers:** *"What's the total budget per person for the trip?"*
-- **Get advice, not just quotes** (turn on **Think it through**): *"Based on my sleep notes, what should I change in my routine?"*
+- **Synthesize across notes:** *"What do Maya, Leo and Priya each want to do in Japan?"*
+- **Add up the numbers:** *"How much is the Japan trip budget per person — flights, hotels, food and JR Pass?"*
+- **Get advice, not just quotes** (turn on **Think it through**): *"Based on my sleep notes on caffeine, melatonin and the circadian rhythm, what should I change in my routine?"*
 - **Follow up:** after an answer, ask *"and why?"* — it remembers the conversation.
 - **Cited & verifiable:** answers show [#1] markers — click one to jump to the exact note.
 
 ## 2 · See how your notes connect
 Nebula links your notes through shared **people, places and topics**, even when they share no words.
 - In the sidebar under **People, places & topics**, open one like **Maya** or **caffeine** — you'll see every note connected to it.
-- In Ask, try *"What is Maya planning across the whole trip?"* — it gathers every note she appears in.
+- In Ask, try *"What is Maya planning in Tokyo, Kyoto and Osaka?"* — it gathers every note she appears in.
 
 ## 3 · Keep topics apart
-Set the search to **trip/** and ask *"Summarize our Japan trip"* — you'll only ever get trip notes, never your research.
+Set the search to **trip/** and ask *"Summarize the Japan trip — Tokyo, Kyoto and Osaka"* — you'll only ever get trip notes, never your research.
 
 ## 4 · Make it yours
 - **New note** to write; link notes with \`[[double brackets]]\`; tag with \`#hashtags\`.
@@ -2259,13 +2260,15 @@ Set the search to **trip/** and ask *"Summarize our Japan trip"* — you'll only
         // Budgets are in REAL tokens: Vietnamese runs ~5–7 tokens/word (diacritic-heavy BPE), so the
         // old 256/512 caps truncated VI answers mid-sentence. 512 grounded / 1024 reason still leave
         // ample context room inside the 4096 window (contextWordBudget reserves output first).
+        // Reasoning models (Qwen3, DeepSeek-R1) emit a long <think> block first, so a 512 grounded cap
+        // gets eaten by thinking with no answer left (answerFellBack) — give them the bigger budget too.
         {
           requestId: 'q',
           query: q,
           context: genContext,
           history,
           modelId,
-          maxTokens: answerMode === 'reason' ? 1024 : 512,
+          maxTokens: answerMode === 'reason' || isReasoningModel(modelId) ? 1024 : 512,
           answerMode,
           // Answers follow the UI language: a Vietnamese interface always gets Vietnamese answers,
           // even for English notes/questions (the no-results line is localized too).

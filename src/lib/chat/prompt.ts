@@ -190,6 +190,10 @@ export function assemblePrompt(
   } else {
     directive = `Using only these notes, answer this question in plain language and cite the chunk numbers you used`;
   }
+  // Repeat the language requirement INSIDE the user turn, right before the question — the spot a model
+  // weights most. The system override alone slipped to English on number/list-heavy answers whose notes
+  // were English; this in-turn reminder makes the UI language stick.
+  if (opts.answerLanguage) directive += `, written entirely in ${opts.answerLanguage}`;
   // Omit the empty "Notes:" scaffold when there is no context, so the model isn't told to read notes that aren't there.
   const user = hasContext
     ? `Notes:\n${blocks}\n\n${directive}: ${query}`
