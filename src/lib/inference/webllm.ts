@@ -293,15 +293,11 @@ export class WebLLMProvider implements InferenceProvider {
    * grounded and not cited — these are background "archivist" tasks, so temperature is 0 for stable,
    * parseable JSON. Throws if no model is loaded; callers treat that as "skip, try later".
    */
-  async complete(
-    prompt: string,
-    opts: { maxTokens?: number; json?: boolean } = {}
-  ): Promise<string> {
+  async complete(prompt: string, opts: { maxTokens?: number } = {}): Promise<string> {
     if (!this.engine) throw new Error('Model not loaded');
     const max_tokens = opts.maxTokens ?? 512;
-    const wantJson = opts.json ?? true; // default: structured JSON for the archivist tasks
     const messages = [{ role: 'user' as const, content: prompt }];
-    if (wantJson && jsonModeOK) {
+    if (jsonModeOK) {
       const attempt = this.engine.chat.completions.create({
         stream: false,
         temperature: 0,
