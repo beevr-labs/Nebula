@@ -12,6 +12,7 @@ const NS = 'nebula.ui';
 const K_MODEL = `${NS}.model`;
 const K_ONBOARDED = `${NS}.onboarded`;
 const K_TUTORIAL = `${NS}.tutorialDone`;
+const K_SEEDED = `${NS}.seedDone`;
 const K_FOLDERS = `${NS}.emptyFolders`;
 const K_VIEW = `${NS}.view`;
 const K_THEME = `${NS}.theme`;
@@ -68,6 +69,18 @@ export function isOnboarded(): boolean {
 export function setOnboarded(done = true): void {
   if (done) write(K_ONBOARDED, '1');
   else remove(K_ONBOARDED);
+}
+
+/** Has the demo vault been seeded (or deliberately skipped via "start blank")? Set once after the
+ *  first-run seed completes, AND when the user picks a blank vault at the gate. Guards the seeding
+ *  branch so a blank-start (or a vault the user emptied) is NOT re-populated with the demo on refresh —
+ *  the seed-on-empty rule would otherwise resurrect the example notes. Cleared by a full reset. */
+export function isSeedDone(): boolean {
+  return read(K_SEEDED) === '1';
+}
+export function setSeedDone(done = true): void {
+  if (done) write(K_SEEDED, '1');
+  else remove(K_SEEDED);
 }
 
 /** Has the first-run guided tour (coach-marks) been seen or dismissed? Distinct from the model gate:

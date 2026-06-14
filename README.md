@@ -28,9 +28,9 @@ And your notes are never trapped: every note is a plain `.md` text file, and one
 
 ## What people use it for
 
-### 🧠 A "company brain" your team can ask
+### 🧠 A "company brain" you can ask
 
-Point it at your team's notes — people, projects, clients, incidents, decisions — and Nebula maps out who and what they're about, and how it all connects. Then ask a real question:
+Point it at a body of notes — people, projects, clients, incidents, decisions — and Nebula maps out who and what they're about, and how it all connects. Then ask a real question:
 
 > *"What happened in the Atlas incident, who was involved, and what was the follow-up?"*
 
@@ -64,7 +64,7 @@ Thousands of PDFs and notes you can't or won't upload — contracts, papers, sou
 
 ### 🧑‍💼 One vault, many clients
 
-Working across clients? Scope a question to a single folder or tag so answers never bleed from one client into another — then export a per-client slice to share, with nothing else leaking through.
+Working across clients? Scope a question to a single folder or tag so answers never bleed from one client into another — each client stays cleanly separated in its own folder or tag.
 
 ## Try it on your machine
 
@@ -88,7 +88,7 @@ Cross-Origin-Embedder-Policy: credentialless
 
 - **GitHub Pages — zero config (included):** push to `main` and the [bundled workflow](.github/workflows/deploy.yml) builds and publishes to `https://<you>.github.io/Nebula/`. One-time: **Settings → Pages → Source = "GitHub Actions."**
 - **Cloudflare Pages / Netlify / Vercel:** add a `_headers` file with the two lines above.
-- **Your data lives in your browser** and stays there. It survives refreshes but is tied to that browser — so **Export Vault** (a one-click `.zip` of your notes + original files) is both your backup and your way out. Nothing is ever locked in.
+- **Your data lives in your browser** and stays there. It survives refreshes but is tied to that browser — so **Export Vault** (a one-click `.zip` of your notes + original files) is your backup, and **Import Vault** restores that `.zip` on a new browser or machine. Nothing is ever locked in.
 
 ## Under the hood
 

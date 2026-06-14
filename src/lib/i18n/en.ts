@@ -21,6 +21,7 @@ export const en: Dict = {
   'topbar.tour': 'Take a quick tour',
   'topbar.github': 'View source on GitHub',
   'topbar.export': 'Export vault',
+  'topbar.importVault': 'Import vault — restore from a .zip backup',
   'topbar.reset': 'Reset all data — recover from a stuck model or a broken note',
   'topbar.advancedOn': 'Advanced mode on — showing technical details',
   'topbar.advancedOff': 'Advanced mode — show technical details',
@@ -30,6 +31,22 @@ export const en: Dict = {
   // ── Model banner ─────────────────────────────────────────────────────────
   'banner.loading': 'Getting your assistant ready',
   'banner.searchNow': 'You can search your notes already — no waiting',
+
+  // ── Data-safety warnings ───────────────────────────────────────────────────
+  'warn.ephemeral':
+    "Your notes won't be saved — this browser is blocking local storage (often a private window or a full disk). Use a normal window and free up space, or anything you write here will vanish when you close the tab. Export your vault to keep a copy.",
+  'warn.quota':
+    'Storage is full — a recent note could not be saved. Export your vault, then free up disk space (or remove some notes/files) and try again.',
+  'warn.quota.flash': '⚠ storage full — that note was not saved',
+  'warn.multiTab':
+    'Nebula is open in another tab. Editing in two tabs at once can clash and corrupt the vault — keep just one open.',
+  'warn.dismiss': 'Dismiss',
+
+  // ── Vault import (restore) ─────────────────────────────────────────────────
+  'import.restoring': 'Restoring vault…',
+  'import.done': '✓ restored {n} notes',
+  'import.bad': "⚠ couldn't read that file — pick a Nebula vault .zip (from Export vault)",
+  'import.skipped': '{n} compressed files skipped — re-export from Nebula',
 
   // ── Sidebar ──────────────────────────────────────────────────────────────
   'side.vault': 'Vault',
@@ -54,6 +71,7 @@ export const en: Dict = {
   'ask.scopeAll': 'all notes',
   'ask.new': 'New',
   'ask.newTip': 'Start a new conversation',
+  'ask.newConfirm': 'Start a new conversation? The current questions and answers will be cleared.',
   'ask.toggle': 'Toggle the Ask panel',
   'ask.resize': 'Drag to resize',
   'ask.idle':
@@ -116,6 +134,7 @@ export const en: Dict = {
   'gate.multilingual': 'multilingual',
   'gate.removeTip': 'Remove from this browser',
   'gate.skip': 'Skip for now — search and notes still work',
+  'gate.startBlank': 'Start with a blank vault',
   'gate.noWebgpu':
     '⚠ This device can’t run the AI assistant, but searching and writing notes still work fully. For the assistant, try Chrome or Edge on a computer with a graphics card.',
   'gate.continue': 'Continue',
@@ -124,7 +143,8 @@ export const en: Dict = {
 
   // ── Reset dialog ─────────────────────────────────────────────────────────
   'reset.title': '⚠ Reset all data?',
-  'reset.lead': 'This permanently erases everything Nebula stored on this device and cannot be undone:',
+  'reset.lead':
+    'This permanently erases everything Nebula stored on this device and cannot be undone:',
   'reset.item.notes': 'All your notes — they live only here, not as files',
   'reset.item.index': 'the search index & the knowledge graph',
   'reset.item.models': 'downloaded AI models (you’ll re-download next time)',
@@ -173,5 +193,9 @@ export const en: Dict = {
   'note.emptyHint':
     'Right-click the tree to add · rename · move · delete. Drag a note onto a folder to move it.',
   'note.today': 'Today',
-  'note.import': 'Import files'
+  'note.import': 'Import files',
+
+  // ── Templates ──────────────────────────────────────────────────────────────
+  'template.overwriteConfirm':
+    "Replace the current note content with this template? This can't be undone."
 };

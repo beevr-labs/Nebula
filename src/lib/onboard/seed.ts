@@ -535,10 +535,7 @@ const GRAPH_VI: Record<string, Extraction> = {
       { name: 'vùng dưới đồi', type: 'place' },
       { name: 'ánh sáng', type: 'concept' }
     ],
-    relations: [
-      r('SCN', 'nhịp sinh học', 'controls'),
-      r('ánh sáng', 'nhịp sinh học', 'sets')
-    ]
+    relations: [r('SCN', 'nhịp sinh học', 'controls'), r('ánh sáng', 'nhịp sinh học', 'sets')]
   },
   'research/adenosine.md': {
     entities: [
@@ -560,10 +557,7 @@ const GRAPH_VI: Record<string, Extraction> = {
       { name: 'tuyến tùng', type: 'concept' },
       { name: 'ánh sáng', type: 'concept' }
     ],
-    relations: [
-      r('tuyến tùng', 'melatonin', 'releases'),
-      r('ánh sáng', 'melatonin', 'suppresses')
-    ]
+    relations: [r('tuyến tùng', 'melatonin', 'releases'), r('ánh sáng', 'melatonin', 'suppresses')]
   },
   'research/why-we-sleep.md': {
     entities: [

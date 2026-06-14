@@ -133,7 +133,6 @@
       back();
     }
   }
-
 </script>
 
 <svelte:window onkeydown={onKey} />
@@ -169,7 +168,9 @@
       <div class="coach-actions">
         <button class="coach-skip" onclick={finish}>{t('tour.skip')}</button>
         {#if i > 0}<button class="coach-btn ghost" onclick={back}>{t('tour.back')}</button>{/if}
-        <button class="coach-btn primary" onclick={next}>{isLast ? t('tour.done') : t('tour.next')}</button>
+        <button class="coach-btn primary" onclick={next}
+          >{isLast ? t('tour.done') : t('tour.next')}</button
+        >
       </div>
     </div>
   </div>

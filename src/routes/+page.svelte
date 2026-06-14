@@ -35,6 +35,7 @@
   import { pickChunking } from '$lib/ingest/chunker';
   import { csvLinearize } from '$lib/ingest/csv';
   import { buildProxyNote, proxyNotePath } from '$lib/ingest/proxy';
+  import { readVaultZip, type ImportedVault } from '$lib/vault/import';
   import {
     CHAT_MODELS,
     formatSize,
@@ -237,7 +238,18 @@
   // Ingestion UI.
   let importMsg = $state('');
   let dropActive = $state(false);
+
+  // Data-safety surfaces (Sprint 1). The whole vault lives in IndexedDB on this one device, so the
+  // ways it can silently vanish must be made LOUD, not swallowed in the console:
+  //   persistFailed — connect() fell back to mem:// → nothing survives a refresh (private window / quota).
+  //   multiTab      — another tab has the same vault open → concurrent writes can wedge the DB.
+  //   quotaHit      — a write hit the storage quota → a note couldn't be saved.
+  let persistFailed = $state(false);
+  let multiTab = $state(false);
+  let quotaHit = $state(false);
+  let blankChosen = $state(false); // user picked "start with a blank vault" at the gate (skip the demo)
   let fileInput: HTMLInputElement;
+  let zipInput: HTMLInputElement; // hidden picker for "Import vault" (.zip restore)
 
   // Note editor (FR-NOTE-001/003, FR-UI-002). Notes are the PRIMARY action — the app lands in
   // Write mode with the subject pre-filled; Ask is the secondary tab.
@@ -443,6 +455,7 @@
     { title: t('tour.done.title'), body: t('tour.done.body') }
   ]);
   function startTour() {
+    askOpen = true; // ensure the Ask rail is visible so the Ask/modes spotlights resolve (no centered fallback)
     tourOn = false; // force a clean remount so the tour always restarts at step 1
     void tick().then(() => (tourOn = true));
   }
@@ -549,6 +562,35 @@
 
   onMount(async () => {
     coi = crossOriginIsolated;
+    // Ask the browser to KEEP our IndexedDB: the vault lives only here, and without a persistence grant
+    // the browser may evict the whole store under disk pressure (silent, total note loss). Best-effort —
+    // not every browser grants it, and a denial just leaves the default eviction heuristics in place; it
+    // never blocks startup. (The loud failure mode — mem:// — is surfaced separately via persistFailed.)
+    try {
+      await navigator.storage?.persist?.();
+    } catch {
+      /* Storage Manager API absent → rely on the browser's default persistence heuristics */
+    }
+    // Detect a second tab on the same vault. Two tabs share ONE IndexedDB; overlapping writes throw
+    // "Can not open transaction" and can wedge the connection — so warn the user to keep one tab. Each
+    // side announces itself on a shared channel; hearing anyone (their ping OR our pong reply) means
+    // we're not alone, so both the existing and the just-opened tab light the warning.
+    try {
+      if (typeof BroadcastChannel !== 'undefined') {
+        const ch = new BroadcastChannel('nebula-vault');
+        ch.onmessage = (e) => {
+          if (e.data === 'ping') {
+            multiTab = true;
+            ch.postMessage('pong');
+          } else if (e.data === 'pong') {
+            multiTab = true;
+          }
+        };
+        ch.postMessage('ping');
+      }
+    } catch {
+      /* BroadcastChannel unavailable → skip the multi-tab hint (best-effort only) */
+    }
     theme = uiPrefs.getTheme();
     advanced = uiPrefs.getAdvanced();
     {
@@ -616,6 +658,7 @@
       // mem:// means NOTHING persists across refresh — surface it rather than silently losing notes.
       console.warn('Nebula: persistent store unavailable, falling back to in-memory:', e);
       await store.connect('mem://', EMBEDDING_DIM);
+      persistFailed = true; // drives the loud, persistent "your notes won't be saved" banner
     }
 
     const indexNote = async (
@@ -644,7 +687,10 @@
     // On first run the model gate is open; wait until the user dismisses it before seeding, because the
     // language they pick there decides which demo notebooks + graph are frozen into the vault. Returning
     // users are already onboarded → the gate never opens → this resolves immediately.
-    if (modelGate) await new Promise<void>((resolve) => { gateClosed = resolve; });
+    if (modelGate)
+      await new Promise<void>((resolve) => {
+        gateClosed = resolve;
+      });
 
     // Rehydrate the vault from the persisted `note` table (FR-DATA-001). In the browser build there
     // are no `.md` files on disk, so this table IS the source of truth — without it every saved note
@@ -662,6 +708,10 @@
         sourcePath: n.sourcePath,
         frontmatter: n.frontmatter
       }));
+    } else if (uiPrefs.isSeedDone()) {
+      // Intentionally blank — the user picked "start blank" at the gate (or emptied the vault before).
+      // The seed-on-empty rule must NOT resurrect the demo, so discard the gate-backdrop seed notes.
+      vault = [];
     } else {
       status = 'indexing vault…';
       // First run, gate now closed → getLocale() is the language the user chose at the gate. Freeze the
@@ -693,6 +743,7 @@
         mode = 'ask';
         rightView = 'files';
       }
+      uiPrefs.setSeedDone(true); // remember the demo is in place so a refresh loads it, never re-seeds
     }
 
     // Rehydrate proxy-note source binaries so Export Vault still ships the originals after a refresh.
@@ -999,13 +1050,20 @@
     }
     // The note(s) are searchable now — confirm immediately, don't wait on graph extraction.
     if (failed > 0) {
-      // Usually it's not a bad note — it's the embedding model failing to load (offline, storage
-      // quota, or no WebGPU). Name THAT so a user doesn't think their note is corrupt.
+      // Classify the first failure so the message is actionable, not generic:
+      //  - quota → IndexedDB is FULL; the note's chunks couldn't be saved. This is data-loss territory,
+      //    so raise the loud, persistent banner (export + free space) on top of the transient pill.
+      //  - model → the embed model didn't load (offline / no WebGPU); the note is fine, just retry.
+      //  - else  → an actually-unreadable note.
+      const isQuota = /quota|exceeded|storage full|disk|no ?space/i.test(firstErr);
       const modelIssue = /model|pipeline|onnx|fetch|network|load|download|gpu|wasm/i.test(firstErr);
+      if (isQuota) quotaHit = true;
       flashIndexed(
-        modelIssue
-          ? "⚠ couldn't get ready to search — check your connection, then save again to retry"
-          : `⚠ ${failed} note${failed > 1 ? 's' : ''} couldn't be read`
+        isQuota
+          ? t('warn.quota.flash')
+          : modelIssue
+            ? "⚠ couldn't get ready to search — check your connection, then save again to retry"
+            : `⚠ ${failed} note${failed > 1 ? 's' : ''} couldn't be read`
       );
     } else if (doneCount > 0)
       flashIndexed(`saved ${doneCount === 1 ? truncate(lastName, 22) : `${doneCount} notes`}`);
@@ -1031,8 +1089,7 @@
       graphBuilding = 0;
     }
     indexRunning = false;
-    if (entSum > 0)
-      flashIndexed(`connected · ${entSum} ${entSum === 1 ? 'topic' : 'topics'}`);
+    if (entSum > 0) flashIndexed(`connected · ${entSum} ${entSum === 1 ? 'topic' : 'topics'}`);
     await refreshEntities(); // once, after the queue drains — never per-job (avoids the read/write race)
     // The heuristic graph is the whole graph now — a save is never "behind" waiting on a model.
     graphStale = false;
@@ -1432,9 +1489,11 @@
 
   // Insert a template into the editor body (FR-NOTE-006), expanding {{date}}/{{title}}/… for now.
   function applyTemplate(id: string) {
-    const t = BUILTIN_TEMPLATES.find((x) => x.id === id);
-    if (!t) return;
-    draftBody = expandTemplate(t.body, { now: new Date().toISOString(), title: draftTitle });
+    const tpl = BUILTIN_TEMPLATES.find((x) => x.id === id);
+    if (!tpl) return;
+    // A template REPLACES the whole draft and there's no undo — confirm before wiping existing content.
+    if (draftBody.trim() && !confirm(t('template.overwriteConfirm'))) return;
+    draftBody = expandTemplate(tpl.body, { now: new Date().toISOString(), title: draftTitle });
     wlState = null;
   }
 
@@ -1625,8 +1684,18 @@
     gateClosed = null;
     uiPrefs.setOnboarded(true);
     // First time the gate is dismissed (picked or skipped) → roll straight into the guided tour,
-    // unless the user has already seen it. Deferred a tick so the gate overlay is fully gone first.
-    if (firstRun && !uiPrefs.isTutorialDone()) startTour();
+    // unless the user has already seen it. Skip it for a blank start: the tour walks through the demo
+    // notes, which won't exist. Deferred a tick so the gate overlay is fully gone first.
+    if (firstRun && !uiPrefs.isTutorialDone() && !blankChosen) startTour();
+  }
+
+  /** Gate option: start with an EMPTY vault instead of the demo notes (for users bringing their own —
+   *  pairs with Import Vault). Marks the demo as "done" BEFORE the gate closes so the first-run seed
+   *  step (which awaits the gate) sees it and skips seeding, leaving the vault blank. */
+  function startBlankVault() {
+    blankChosen = true;
+    uiPrefs.setSeedDone(true);
+    closeModelGate();
   }
   function chooseModel(id: string) {
     if (modelLoading) return; // a load is already in flight — can't switch until it finishes
@@ -2096,6 +2165,9 @@
 
   /** Start a fresh Ask conversation: drop the transcript + the current answer and its panels. */
   function newConversation() {
+    // Guard a stray click: the Q&A transcript is in-memory only, so clearing it is irreversible.
+    // Only prompt when there's actually something to lose (empty panel → no nag).
+    if ((history.length || answer || hits.length) && !confirm(t('ask.newConfirm'))) return;
     history = [];
     askedQuery = '';
     answer = '';
@@ -2182,6 +2254,84 @@
     a.download = 'nebula-vault.zip';
     a.click();
     URL.revokeObjectURL(url);
+  }
+
+  /**
+   * Restore a vault from an exported `.zip` (FR-DATA-006, the return trip) — the other half of Export,
+   * so a backup is actually recoverable. MERGES into the current vault: a note whose path already
+   * exists is overwritten (re-import), originals are restored under sources/ so a later Export still
+   * ships them. `.md` files become searchable notes via the normal background index queue; non-`.md`
+   * files are kept as original binaries. Compressed entries (a re-zipped archive) are reported, not
+   * silently dropped. Read-only on failure: a bad/non-Nebula zip just shows a message.
+   */
+  async function importVault(file: File | null) {
+    if (!file || !pipe) return;
+    flashIndexed(t('import.restoring')); // visible header confirmation (importMsg isn't rendered)
+    let vault0: ImportedVault;
+    try {
+      vault0 = readVaultZip(new Uint8Array(await file.arrayBuffer()));
+    } catch {
+      flashIndexed(t('import.bad'));
+      if (zipInput) zipInput.value = '';
+      return;
+    }
+    let restored = 0;
+    let firstDoc = '';
+    try {
+      for (const o of vault0.originals) {
+        await putSource(o.path, o.bytes); // persist the original so a later Export survives a refresh
+        originals = [
+          ...originals.filter((x) => x.path !== o.path),
+          { path: o.path, bytes: o.bytes }
+        ];
+      }
+      for (const n of vault0.notes) {
+        const docId = n.path;
+        const fm = n.frontmatter;
+        const stem =
+          docId
+            .split('/')
+            .pop()
+            ?.replace(/\.[^.]+$/, '') ?? docId;
+        const title = typeof fm.title === 'string' && fm.title ? fm.title : stem;
+        const aliases = Array.isArray(fm.aliases)
+          ? fm.aliases.filter((a): a is string => typeof a === 'string')
+          : [];
+        const sourcePath = typeof fm.source === 'string' ? fm.source : undefined;
+        const ext = sourcePath?.split('.').pop()?.toLowerCase();
+        const kind = ext === 'pdf' ? 'pdf' : ext === 'csv' ? 'csv' : undefined;
+        const isReimport = vault.some((v) => v.docId === docId);
+        await pipe.putNote({
+          docId,
+          title,
+          body: n.body,
+          aliases,
+          kind,
+          sourcePath,
+          frontmatter: fm
+        });
+        vault = [
+          ...vault.filter((v) => v.docId !== docId),
+          { docId, title, aliases, text: n.body, kind, sourcePath, frontmatter: fm }
+        ];
+        // Queue embedding so the restored note is searchable; re-import drops the stale chunks first.
+        // The tour note is meta (it contains the example questions) — persist but never index it.
+        if (n.body.trim() && docId !== TOUR_DOC)
+          enqueueIndex(docId, n.body, isReimport ? docId : undefined);
+        if (!firstDoc) firstDoc = docId;
+        restored++;
+      }
+    } catch (e) {
+      flashIndexed(`⚠ ${e instanceof Error ? e.message : String(e)}`);
+      if (zipInput) zipInput.value = '';
+      return;
+    }
+    if (firstDoc) showSource(firstDoc);
+    flashIndexed(
+      t('import.done', { n: restored }) +
+        (vault0.skipped.length ? ` · ${t('import.skipped', { n: vault0.skipped.length })}` : '')
+    );
+    if (zipInput) zipInput.value = '';
   }
 
   // Weaver popover (FR-LINK-002).
@@ -2508,6 +2658,9 @@
     {:else if name === 'download'}<path d="M8 3v7" /><polyline points="5,7.5 8,10.5 11,7.5" /><path
         d="M3.5 12.5h9"
       />
+    {:else if name === 'upload'}<path d="M8 12.5V5.5" /><polyline
+        points="5,8.5 8,5.5 11,8.5"
+      /><path d="M3.5 3h9" />
     {:else if name === 'arrow'}<line x1="3.5" y1="8" x2="12" y2="8" /><polyline
         points="8.5,4.5 12,8 8.5,11.5"
       />
@@ -2555,7 +2708,12 @@
       />
     {:else if name === 'send'}<path d="M3 8h8" /><polyline points="7.5,4.5 11,8 7.5,11.5" />
     {:else if name === 'bolt'}<path d="M9 2L4 9h3l-1 5 5-7H8z" />
-    {:else if name === 'panel'}<rect x="2.5" y="3" width="11" height="10" rx="1.5" /><line x1="9.5" y1="3" x2="9.5" y2="13" />
+    {:else if name === 'panel'}<rect x="2.5" y="3" width="11" height="10" rx="1.5" /><line
+        x1="9.5"
+        y1="3"
+        x2="9.5"
+        y2="13"
+      />
     {:else if name === 'menu'}<line x1="2.5" y1="4.5" x2="13.5" y2="4.5" /><line
         x1="2.5"
         y1="8"
@@ -2643,7 +2801,11 @@
       <span class="brand-name">Nebula</span>
     </div>
     <div class="tb-center">
-      <button class="omnibox nb-hov nb-focusable" onclick={openSwitcher} title="{t('topbar.search')} (⌘K)">
+      <button
+        class="omnibox nb-hov nb-focusable"
+        onclick={openSwitcher}
+        title="{t('topbar.search')} (⌘K)"
+      >
         <span class="omni-ic">{@render ic('search', 15)}</span>
         <span class="omni-txt">{t('topbar.search')}</span>
         <kbd>⌘K</kbd>
@@ -2724,6 +2886,12 @@
         title={t('topbar.github')}
         aria-label={t('topbar.github')}>{@render ic('github', 16)}</a
       >
+      <button
+        class="icon-btn nb-hov nb-press"
+        onclick={() => zipInput?.click()}
+        title={t('topbar.importVault')}
+        aria-label={t('topbar.importVault')}>{@render ic('upload', 16)}</button
+      >
       <button class="icon-btn nb-hov nb-press" onclick={exportVault} title={t('topbar.export')}
         >{@render ic('download', 16)}</button
       >
@@ -2751,13 +2919,48 @@
     <div class="model-banner">
       <span class="spinner"></span>
       <span
-        >{t('banner.loading')} · <strong>{modelById(modelId)?.label ?? t('topbar.model')}</strong
-        ></span
+        >{t('banner.loading')} ·
+        <strong>{modelById(modelId)?.label ?? t('topbar.model')}</strong></span
       >
       <span class="mb-bar"><span class="mb-fill" style="width:{loadPct}%"></span></span>
       <span class="mb-pct">{loadPct}%</span>
       <span class="mb-div"></span>
       <span class="mb-note">{t('banner.searchNow')}</span>
+    </div>
+  {/if}
+
+  <!-- ───────── DATA-SAFETY WARNINGS (persistent, dismissible) ───────── -->
+  {#if persistFailed}
+    <div class="warn-banner warn-danger" role="alert">
+      <span class="warn-msg">⚠ {t('warn.ephemeral')}</span>
+      <button
+        class="warn-x"
+        onclick={() => (persistFailed = false)}
+        title={t('warn.dismiss')}
+        aria-label={t('warn.dismiss')}>{@render ic('close', 12)}</button
+      >
+    </div>
+  {/if}
+  {#if quotaHit}
+    <div class="warn-banner warn-danger" role="alert">
+      <span class="warn-msg">⚠ {t('warn.quota')}</span>
+      <button
+        class="warn-x"
+        onclick={() => (quotaHit = false)}
+        title={t('warn.dismiss')}
+        aria-label={t('warn.dismiss')}>{@render ic('close', 12)}</button
+      >
+    </div>
+  {/if}
+  {#if multiTab}
+    <div class="warn-banner warn-caution" role="alert">
+      <span class="warn-msg">⚠ {t('warn.multiTab')}</span>
+      <button
+        class="warn-x"
+        onclick={() => (multiTab = false)}
+        title={t('warn.dismiss')}
+        aria-label={t('warn.dismiss')}>{@render ic('close', 12)}</button
+      >
     </div>
   {/if}
 
@@ -2837,14 +3040,16 @@
             </button>
           {/if}
           <button class="ent-row open-lens nb-hov" onclick={() => switchView('graph')}>
-            <span class="lens-ic">{@render ic('graph', 14)}</span> {t('side.seeConnections')}
+            <span class="lens-ic">{@render ic('graph', 14)}</span>
+            {t('side.seeConnections')}
           </button>
         {:else}
           <button class="build-graph nb-press" onclick={buildVaultGraph} disabled={graphBusy}>
             {#if graphBusy}<span class="spinner"></span>{t('side.connecting')}{:else}{@render ic(
                 'graph',
                 14
-              )} {t('side.connect')}{/if}
+              )}
+              {t('side.connect')}{/if}
           </button>
         {/if}
         {#if graphStale && entityIndex.length}
@@ -2859,7 +3064,8 @@
             {#if graphBusy}<span class="spinner"></span>{t('side.connecting')}{:else}{@render ic(
                 'graph',
                 12
-              )} {t('side.updateConnections')}{/if}
+              )}
+              {t('side.updateConnections')}{/if}
           </button>
         {/if}
 
@@ -3188,7 +3394,8 @@
                 <div class="note-actions">
                   {#if !activeNote.sourcePath}<button
                       class="act-btn nb-hov nb-press"
-                      onclick={() => editNote(activeNote)}>{@render ic('edit', 14)} {t('note.edit')}</button
+                      onclick={() => editNote(activeNote)}
+                      >{@render ic('edit', 14)} {t('note.edit')}</button
                     >{/if}
                   <button
                     class="icon-btn nb-hov nb-press"
@@ -3276,7 +3483,8 @@
                     >{@render ic('plus', 14)} {t('note.newNote')}</button
                   >
                   <button class="ghost-btn" onclick={openDailyNote}>{t('note.today')}</button>
-                  <button class="ghost-btn" onclick={() => fileInput?.click()}>{t('note.import')}</button
+                  <button class="ghost-btn" onclick={() => fileInput?.click()}
+                    >{t('note.import')}</button
                   >
                 </div>
               </div>
@@ -3288,222 +3496,226 @@
 
     <!-- ASK RAIL -->
     {#if askOpen}
-    <!-- divider: center <-> ask rail -->
-    <div
-      class="pane-divider"
-      role="separator"
-      aria-orientation="vertical"
-      title={t('ask.resize')}
-      onpointerdown={(e) => startResize('ask', e)}
-    ></div>
-    <aside class="rail">
-      <div class="rail-head">
-        <span class="rail-title">{t('ask.title')}</span>
-        <span class="rail-scope"
-          >{t('ask.searching')}
-          <span class="mono">{scope ? scopeLabel(scope) : t('ask.scopeAll')}</span></span
-        >
-        <span class="spacer"></span>
-        {#if history.length || answer || hits.length}
-          <button
-            class="rail-new nb-hov"
-            onclick={newConversation}
-            disabled={busy}
-            title={t('ask.newTip')}>{@render ic('plus', 13)} {t('ask.new')}</button
+      <!-- divider: center <-> ask rail -->
+      <div
+        class="pane-divider"
+        role="separator"
+        aria-orientation="vertical"
+        title={t('ask.resize')}
+        onpointerdown={(e) => startResize('ask', e)}
+      ></div>
+      <aside class="rail">
+        <div class="rail-head">
+          <span class="rail-title">{t('ask.title')}</span>
+          <span class="rail-scope"
+            >{t('ask.searching')}
+            <span class="mono">{scope ? scopeLabel(scope) : t('ask.scopeAll')}</span></span
           >
-        {/if}
-        <button
-          class="rail-x nb-hov"
-          onclick={toggleAsk}
-          title={t('ask.toggle')}
-          aria-label={t('ask.toggle')}>{@render ic('close', 13)}<kbd>⌘J</kbd></button
-        >
-      </div>
-
-      <div class="rail-body">
-        {#if history.length}
-          <!-- Conversation transcript (FR-CHAT-006): prior turns above the live one. Past answers keep
-               their prose but drop [#n] buttons (their retrieved hits are no longer held). -->
-          {#each history as turn, i (i)}
-            <div class="ask-bubble past">{turn.query}</div>
-            <article class="prose answer past">{@html pastAnswerHtml(turn.answer)}</article>
-          {/each}
-        {/if}
-        {#if busy || answer || hits.length}
-          {#if askedQuery}<div class="ask-bubble">{askedQuery}</div>{/if}
-          {#if busy && !reasoning && !answerHtml}<div class="rail-loading">
-              <span class="spinner"></span><span>{status}</span>
-            </div>{/if}
-          {#if reasoning}
-            <!-- Reasoning panel: auto-open while the model is still thinking (no answer text yet),
-                 collapses once the real answer starts streaming. User can re-open it any time. -->
-            <details class="think" open={busy && !answerHtml}>
-              <summary>
-                {@render ic('graph', 13)}
-                <span>{busy && !answerHtml ? t('ask.thinking') : t('ask.thoughts')}</span>
-              </summary>
-              <div class="think-body prose">{@html reasoningHtml}</div>
-            </details>
-          {/if}
-          {#if answerFellBack}
-            <div class="rail-note">
-              The model kept its whole answer inside its private reasoning and didn't write a
-              separate final answer, so its reasoning is shown below. If this keeps happening, a
-              non-reasoning model (e.g. <strong>Qwen2.5-7B</strong>) answers more reliably.
-            </div>
-          {/if}
-          {#if answerHtml}
-            <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-            <article
-              class="prose answer"
-              role="document"
-              onclick={onRenderedClick}
-              onkeydown={(e) => e.key === 'Enter' && onRenderedClick(e as unknown as MouseEvent)}
+          <span class="spacer"></span>
+          {#if history.length || answer || hits.length}
+            <button
+              class="rail-new nb-hov"
+              onclick={newConversation}
+              disabled={busy}
+              title={t('ask.newTip')}>{@render ic('plus', 13)} {t('ask.new')}</button
             >
-              {@html answerHtml}{#if busy}<span class="nb-cursor"></span>{/if}
-            </article>
           {/if}
-          {#if hits.length}
-            {@const usage = answerUsage(
-              hits.map((h) => h.chunkId),
-              cites.map((c) => c.chunkId)
-            )}
-            <div class="used-strip">
-              {#if usage.count > 0}<span class="us-ok"
-                  >{@render ic('check', 13)}
-                  {t('ask.used', { count: usage.count, total: hits.length })}</span
-                >{/if}
-              {#if graphInfo}<span class="us-div"></span><span class="us-graph">{graphInfo}</span
-                >{/if}
-              {#if advanced && (ttft > 0 || tps > 0)}<span class="us-div"></span><span
-                  class="us-perf"
-                  title="Time to first token · generation throughput"
-                  >{@render ic('bolt', 12)}{ttft} ms · {tps} tok/s</span
-                >{/if}
-            </div>
-            <div class="label">{t('ask.sources')}</div>
-            <div class="src-list">
-              {#each hits as h, i (h.chunkId)}
-                {@const used = usage.used.has(h.chunkId)}
-                {@const viaGraph = graphExpandedIds.has(h.chunkId)}
-                <button class="src-row nb-hov" class:used onclick={() => jumpTo(h.chunkId)}>
-                  <span class="src-n">#{i + 1}</span>
-                  <span class="src-path mono">{h.docId}</span>
-                  {#if viaGraph}<span class="src-graph"
-                      >↳ {(graphShared.get(h.chunkId)?.sharedEntities ?? []).join(', ')}</span
-                    >{:else}<span class="src-why">{advanced ? t('ask.vector') : t('ask.match')}</span
-                    >{/if}
-                  {#if advanced}<span class="src-score mono">{h.score.toFixed(2)}</span>{/if}
-                </button>
-              {/each}
-            </div>
-            {#if graph}
-              <div class="micromap">
-                <div class="label sm">{advanced ? t('ask.subgraph') : t('ask.howFound')}</div>
-                <svg
-                  width="100%"
-                  height={32 + graph.nodes.filter((n) => n.kind === 'chunk').length * 26}
-                  viewBox="0 0 300 {32 + graph.nodes.filter((n) => n.kind === 'chunk').length * 26}"
-                >
-                  {#each graph.edges as e, i (e.to)}
-                    <line
-                      x1="34"
-                      y1="20"
-                      x2="250"
-                      y2={26 + i * 26}
-                      stroke="var(--line-strong)"
-                      stroke-width={e.width}
-                      stroke-dasharray={e.viaGraph ? '4 3' : ''}
-                    />
-                  {/each}
-                  <circle cx="34" cy="20" r="6" fill="var(--accent)" />
-                  {#each graph.nodes.filter((n) => n.kind === 'chunk') as n, i (n.id)}
-                    <circle
-                      cx="250"
-                      cy={26 + i * 26}
-                      r="4.5"
-                      fill={n.viaGraph ? 'var(--accent)' : 'var(--surface)'}
-                      stroke={n.viaGraph ? 'var(--accent)' : 'var(--line-strong)'}
-                      stroke-width="1.5"
-                    />
-                    <text x="240" y={29 + i * 26} class="mm-label" text-anchor="end">{n.label}</text
-                    >
-                  {/each}
-                </svg>
+          <button
+            class="rail-x nb-hov"
+            onclick={toggleAsk}
+            title={t('ask.toggle')}
+            aria-label={t('ask.toggle')}>{@render ic('close', 13)}<kbd>⌘J</kbd></button
+          >
+        </div>
+
+        <div class="rail-body">
+          {#if history.length}
+            <!-- Conversation transcript (FR-CHAT-006): prior turns above the live one. Past answers keep
+               their prose but drop [#n] buttons (their retrieved hits are no longer held). -->
+            {#each history as turn, i (i)}
+              <div class="ask-bubble past">{turn.query}</div>
+              <article class="prose answer past">{@html pastAnswerHtml(turn.answer)}</article>
+            {/each}
+          {/if}
+          {#if busy || answer || hits.length}
+            {#if askedQuery}<div class="ask-bubble">{askedQuery}</div>{/if}
+            {#if busy && !reasoning && !answerHtml}<div class="rail-loading">
+                <span class="spinner"></span><span>{status}</span>
+              </div>{/if}
+            {#if reasoning}
+              <!-- Reasoning panel: auto-open while the model is still thinking (no answer text yet),
+                 collapses once the real answer starts streaming. User can re-open it any time. -->
+              <details class="think" open={busy && !answerHtml}>
+                <summary>
+                  {@render ic('graph', 13)}
+                  <span>{busy && !answerHtml ? t('ask.thinking') : t('ask.thoughts')}</span>
+                </summary>
+                <div class="think-body prose">{@html reasoningHtml}</div>
+              </details>
+            {/if}
+            {#if answerFellBack}
+              <div class="rail-note">
+                The model kept its whole answer inside its private reasoning and didn't write a
+                separate final answer, so its reasoning is shown below. If this keeps happening, a
+                non-reasoning model (e.g. <strong>Qwen2.5-7B</strong>) answers more reliably.
               </div>
             {/if}
-            <button class="compile-btn nb-press" onclick={openCompileFromHits}
-              >{@render ic('box', 16)} {t('ask.share')}</button
-            >
-          {/if}
-        {:else}
-          <p class="rail-idle">{t('ask.idle')}</p>
-          <div class="label">{t('ask.try')}</div>
-          <div class="try-list">
-            {#each [t('ask.try1'), t('ask.try2'), t('ask.try3')] as s}
-              <button
-                class="try nb-hov"
-                onclick={() => {
-                  query = s;
-                  ask();
-                }}
-                disabled={!ready}>{s}</button
+            {#if answerHtml}
+              <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+              <article
+                class="prose answer"
+                role="document"
+                onclick={onRenderedClick}
+                onkeydown={(e) => e.key === 'Enter' && onRenderedClick(e as unknown as MouseEvent)}
               >
-            {/each}
-          </div>
-        {/if}
-      </div>
+                {@html answerHtml}{#if busy}<span class="nb-cursor"></span>{/if}
+              </article>
+            {/if}
+            {#if hits.length}
+              {@const usage = answerUsage(
+                hits.map((h) => h.chunkId),
+                cites.map((c) => c.chunkId)
+              )}
+              <div class="used-strip">
+                {#if usage.count > 0}<span class="us-ok"
+                    >{@render ic('check', 13)}
+                    {t('ask.used', { count: usage.count, total: hits.length })}</span
+                  >{/if}
+                {#if graphInfo}<span class="us-div"></span><span class="us-graph">{graphInfo}</span
+                  >{/if}
+                {#if advanced && (ttft > 0 || tps > 0)}<span class="us-div"></span><span
+                    class="us-perf"
+                    title="Time to first token · generation throughput"
+                    >{@render ic('bolt', 12)}{ttft} ms · {tps} tok/s</span
+                  >{/if}
+              </div>
+              <div class="label">{t('ask.sources')}</div>
+              <div class="src-list">
+                {#each hits as h, i (h.chunkId)}
+                  {@const used = usage.used.has(h.chunkId)}
+                  {@const viaGraph = graphExpandedIds.has(h.chunkId)}
+                  <button class="src-row nb-hov" class:used onclick={() => jumpTo(h.chunkId)}>
+                    <span class="src-n">#{i + 1}</span>
+                    <span class="src-path mono">{h.docId}</span>
+                    {#if viaGraph}<span class="src-graph"
+                        >↳ {(graphShared.get(h.chunkId)?.sharedEntities ?? []).join(', ')}</span
+                      >{:else}<span class="src-why"
+                        >{advanced ? t('ask.vector') : t('ask.match')}</span
+                      >{/if}
+                    {#if advanced}<span class="src-score mono">{h.score.toFixed(2)}</span>{/if}
+                  </button>
+                {/each}
+              </div>
+              {#if graph}
+                <div class="micromap">
+                  <div class="label sm">{advanced ? t('ask.subgraph') : t('ask.howFound')}</div>
+                  <svg
+                    width="100%"
+                    height={32 + graph.nodes.filter((n) => n.kind === 'chunk').length * 26}
+                    viewBox="0 0 300 {32 +
+                      graph.nodes.filter((n) => n.kind === 'chunk').length * 26}"
+                  >
+                    {#each graph.edges as e, i (e.to)}
+                      <line
+                        x1="34"
+                        y1="20"
+                        x2="250"
+                        y2={26 + i * 26}
+                        stroke="var(--line-strong)"
+                        stroke-width={e.width}
+                        stroke-dasharray={e.viaGraph ? '4 3' : ''}
+                      />
+                    {/each}
+                    <circle cx="34" cy="20" r="6" fill="var(--accent)" />
+                    {#each graph.nodes.filter((n) => n.kind === 'chunk') as n, i (n.id)}
+                      <circle
+                        cx="250"
+                        cy={26 + i * 26}
+                        r="4.5"
+                        fill={n.viaGraph ? 'var(--accent)' : 'var(--surface)'}
+                        stroke={n.viaGraph ? 'var(--accent)' : 'var(--line-strong)'}
+                        stroke-width="1.5"
+                      />
+                      <text x="240" y={29 + i * 26} class="mm-label" text-anchor="end"
+                        >{n.label}</text
+                      >
+                    {/each}
+                  </svg>
+                </div>
+              {/if}
+              <button class="compile-btn nb-press" onclick={openCompileFromHits}
+                >{@render ic('box', 16)} {t('ask.share')}</button
+              >
+            {/if}
+          {:else}
+            <p class="rail-idle">{t('ask.idle')}</p>
+            <div class="label">{t('ask.try')}</div>
+            <div class="try-list">
+              {#each [t('ask.try1'), t('ask.try2'), t('ask.try3')] as s}
+                <button
+                  class="try nb-hov"
+                  onclick={() => {
+                    query = s;
+                    ask();
+                  }}
+                  disabled={!ready}>{s}</button
+                >
+              {/each}
+            </div>
+          {/if}
+        </div>
 
-      <div class="composer" data-coach="ask">
-        <div class="composer-box">
-          <textarea
-            bind:value={query}
-            rows="1"
-            placeholder={t('ask.placeholder')}
-            disabled={busy}
-            onkeydown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                ask();
-              }
-            }}
-          ></textarea>
-          <button
-            class="send"
-            class:on={query.trim()}
-            onclick={ask}
-            disabled={!ready || busy}
-            aria-label={t('ask.send')}>{@render ic('send', 16)}</button
-          >
-        </div>
-        <div class="composer-foot">
-          <div class="mode-chips" data-coach="modes">
+        <div class="composer" data-coach="ask">
+          <div class="composer-box">
+            <textarea
+              bind:value={query}
+              rows="1"
+              placeholder={t('ask.placeholder')}
+              disabled={busy}
+              onkeydown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  ask();
+                }
+              }}
+            ></textarea>
             <button
-              class="mchip nb-hov"
-              class:on={answerMode === 'reason'}
-              onclick={() => (answerMode = 'reason')}
-              title={t('mode.reasonTip')}
-              >{@render ic('bolt', 12)} {advanced ? t('mode.reasonAdv') : t('mode.reason')}</button
-            >
-            <button
-              class="mchip nb-hov"
-              class:on={answerMode === 'grounded'}
-              onclick={() => (answerMode = 'grounded')}
-              title={t('mode.groundedTip')}
-              >{advanced ? t('mode.groundedAdv') : t('mode.grounded')}</button
-            >
-            <button
-              class="mchip nb-hov"
-              class:on={graphRagOn}
-              onclick={() => (graphRagOn = !graphRagOn)}
-              title={t('mode.graphTip')}
-              >{@render ic('graph', 12)} {advanced ? t('mode.graphAdv') : t('mode.graph')}</button
+              class="send"
+              class:on={query.trim()}
+              onclick={ask}
+              disabled={!ready || busy}
+              aria-label={t('ask.send')}>{@render ic('send', 16)}</button
             >
           </div>
-          <span class="dim sm">{t('ask.runsLocal')}</span>
+          <div class="composer-foot">
+            <div class="mode-chips" data-coach="modes">
+              <button
+                class="mchip nb-hov"
+                class:on={answerMode === 'reason'}
+                onclick={() => (answerMode = 'reason')}
+                title={t('mode.reasonTip')}
+                >{@render ic('bolt', 12)}
+                {advanced ? t('mode.reasonAdv') : t('mode.reason')}</button
+              >
+              <button
+                class="mchip nb-hov"
+                class:on={answerMode === 'grounded'}
+                onclick={() => (answerMode = 'grounded')}
+                title={t('mode.groundedTip')}
+                >{advanced ? t('mode.groundedAdv') : t('mode.grounded')}</button
+              >
+              <button
+                class="mchip nb-hov"
+                class:on={graphRagOn}
+                onclick={() => (graphRagOn = !graphRagOn)}
+                title={t('mode.graphTip')}
+                >{@render ic('graph', 12)} {advanced ? t('mode.graphAdv') : t('mode.graph')}</button
+              >
+            </div>
+            <span class="dim sm">{t('ask.runsLocal')}</span>
+          </div>
         </div>
-      </div>
-    </aside>
+      </aside>
     {/if}
   </div>
 
@@ -3518,6 +3730,13 @@
       pendingImportFolder = 'notes'; // reset so the next plain "Import files" lands in the vault root
       void ingestFiles(e.currentTarget.files, folder);
     }}
+  />
+  <input
+    class="hidden-input"
+    type="file"
+    accept=".zip"
+    bind:this={zipInput}
+    onchange={(e) => void importVault(e.currentTarget.files?.[0] ?? null)}
   />
 
   <!-- ───────── OVERLAYS ───────── -->
@@ -3885,7 +4104,8 @@
                   disabled={modelLoading || deletingModel === m.id}
                 >
                   <span class="gate-nm"
-                    >{m.label}{#if m.multilingual}<span class="mini-badge">{t('gate.multilingual')}</span
+                    >{m.label}{#if m.multilingual}<span class="mini-badge"
+                        >{t('gate.multilingual')}</span
                       >{/if}</span
                   >
                   <span class="gate-sz mono"
@@ -3909,6 +4129,7 @@
           <div class="gate-nowebgpu">{t('gate.noWebgpu')}</div>
           <button class="gate-skip" onclick={closeModelGate}>{t('gate.continue')}</button>
         {/if}
+        <button class="gate-blank" onclick={startBlankVault}>{t('gate.startBlank')}</button>
         <div class="gate-danger">
           <span class="dim sm">{t('gate.brokenHint')}</span>
           <button class="reset-link" onclick={openResetDialog}>{t('gate.resetLink')}</button>
@@ -4221,6 +4442,47 @@
   .mb-note {
     color: var(--accent-ink);
     opacity: 0.8;
+  }
+
+  /* Data-safety banners (persist-failed / quota / multi-tab). Amber base; a red left rail marks the
+     two that mean active data loss, an amber rail the advisory multi-tab one. Dismissible. */
+  .warn-banner {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 16px;
+    background: var(--warn-soft);
+    color: var(--warn);
+    font-size: 12.5px;
+    line-height: 1.35;
+    border-bottom: 1px solid var(--line-strong);
+  }
+  .warn-danger {
+    border-left: 3px solid var(--error, #b3261e);
+  }
+  .warn-caution {
+    border-left: 3px solid var(--warn);
+  }
+  .warn-msg {
+    flex: 1;
+    font-weight: 500;
+  }
+  .warn-x {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border: none;
+    border-radius: var(--r-sm);
+    background: transparent;
+    color: inherit;
+    opacity: 0.75;
+  }
+  .warn-x:hover {
+    background: var(--hover);
+    opacity: 1;
   }
 
   /* body grid — column widths are set inline via `bodyCols` (resizable, FR-UI-001); this is a fallback. */
@@ -4809,6 +5071,33 @@
     border: 1px solid var(--line);
     border-radius: 4px;
     padding: 1px 5px;
+  }
+  /* Fenced code blocks (``` …) render as <pre><code>; give them a real block look (the inline-code
+     pill above would otherwise be the only styling). Reset the inner <code> so the pill doesn't double up. */
+  .prose :global(pre) {
+    font-family: var(--mono);
+    font-size: 0.85em;
+    line-height: 1.5;
+    background: var(--surface-alt);
+    border: 1px solid var(--line);
+    border-radius: var(--r-md);
+    padding: 10px 12px;
+    margin: 0 0 14px;
+    overflow-x: auto;
+  }
+  .prose :global(pre code) {
+    background: none;
+    border: none;
+    border-radius: 0;
+    padding: 0;
+    font-size: inherit;
+  }
+  /* Blockquotes (> …): a left rule + muted text so they're visually distinct from body text. */
+  .prose :global(blockquote) {
+    margin: 0 0 14px;
+    padding: 2px 0 2px 12px;
+    border-left: 3px solid var(--accent-rim);
+    color: var(--ink-2);
   }
   .prose :global(mark) {
     background: var(--mark);
@@ -5854,6 +6143,20 @@
     font-size: 13px;
     cursor: pointer;
     padding: 6px;
+  }
+  .gate-blank {
+    border: none;
+    background: none;
+    color: var(--faint);
+    font: inherit;
+    font-size: 12.5px;
+    cursor: pointer;
+    padding: 2px 6px;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  .gate-blank:hover {
+    color: var(--muted);
   }
   .gate-nowebgpu {
     padding: 12px;

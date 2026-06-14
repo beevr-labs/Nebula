@@ -21,6 +21,7 @@ export const vi: Dict = {
   'topbar.tour': 'Xem hướng dẫn nhanh',
   'topbar.github': 'Xem mã nguồn trên GitHub',
   'topbar.export': 'Xuất kho ghi chú',
+  'topbar.importVault': 'Nhập kho ghi chú — khôi phục từ bản sao lưu .zip',
   'topbar.reset': 'Đặt lại toàn bộ dữ liệu — khôi phục khi mô hình bị treo hoặc ghi chú lỗi',
   'topbar.advancedOn': 'Chế độ nâng cao đang bật — hiện thông số kỹ thuật',
   'topbar.advancedOff': 'Chế độ nâng cao — hiện thông số kỹ thuật',
@@ -30,6 +31,22 @@ export const vi: Dict = {
   // ── Model banner ─────────────────────────────────────────────────────────
   'banner.loading': 'Đang chuẩn bị trợ lý',
   'banner.searchNow': 'Bạn đã có thể tìm ghi chú ngay — không phải chờ',
+
+  // ── Cảnh báo an toàn dữ liệu ────────────────────────────────────────────────
+  'warn.ephemeral':
+    'Ghi chú của bạn sẽ KHÔNG được lưu — trình duyệt này đang chặn lưu trữ cục bộ (thường do cửa sổ ẩn danh hoặc ổ đĩa đầy). Hãy dùng cửa sổ thường và giải phóng dung lượng, nếu không mọi thứ bạn viết sẽ mất khi đóng tab. Hãy Xuất kho ghi chú để giữ một bản sao.',
+  'warn.quota':
+    'Bộ nhớ đã đầy — một ghi chú vừa rồi không lưu được. Hãy Xuất kho ghi chú, rồi giải phóng dung lượng (hoặc xóa bớt ghi chú/tệp) và thử lại.',
+  'warn.quota.flash': '⚠ bộ nhớ đầy — ghi chú đó chưa được lưu',
+  'warn.multiTab':
+    'Nebula đang mở ở một tab khác. Sửa ở hai tab cùng lúc có thể xung đột và hỏng kho ghi chú — chỉ nên mở một tab.',
+  'warn.dismiss': 'Bỏ qua',
+
+  // ── Nhập (khôi phục) kho ghi chú ────────────────────────────────────────────
+  'import.restoring': 'Đang khôi phục kho ghi chú…',
+  'import.done': '✓ đã khôi phục {n} ghi chú',
+  'import.bad': '⚠ không đọc được tệp đó — hãy chọn tệp .zip kho Nebula (từ Xuất kho ghi chú)',
+  'import.skipped': 'bỏ qua {n} tệp bị nén — hãy xuất lại từ Nebula',
 
   // ── Sidebar ──────────────────────────────────────────────────────────────
   'side.vault': 'Kho ghi chú',
@@ -54,6 +71,7 @@ export const vi: Dict = {
   'ask.scopeAll': 'tất cả ghi chú',
   'ask.new': 'Mới',
   'ask.newTip': 'Bắt đầu cuộc trò chuyện mới',
+  'ask.newConfirm': 'Bắt đầu cuộc trò chuyện mới? Toàn bộ hỏi-đáp hiện tại sẽ bị xoá.',
   'ask.toggle': 'Bật/tắt khung Hỏi',
   'ask.resize': 'Kéo để đổi kích cỡ',
   'ask.idle':
@@ -115,6 +133,7 @@ export const vi: Dict = {
   'gate.multilingual': 'đa ngôn ngữ',
   'gate.removeTip': 'Gỡ khỏi trình duyệt này',
   'gate.skip': 'Bỏ qua — vẫn tìm kiếm và ghi chú được',
+  'gate.startBlank': 'Bắt đầu với kho ghi chú trống',
   'gate.noWebgpu':
     '⚠ Máy này không chạy được trợ lý AI, nhưng tìm kiếm và viết ghi chú vẫn hoạt động đầy đủ. Để dùng trợ lý, hãy thử Chrome hoặc Edge trên máy có card đồ họa.',
   'gate.continue': 'Tiếp tục',
@@ -172,5 +191,8 @@ export const vi: Dict = {
   'note.emptyHint':
     'Bấm chuột phải vào cây thư mục để thêm · đổi tên · di chuyển · xóa. Kéo một ghi chú vào thư mục để chuyển.',
   'note.today': 'Hôm nay',
-  'note.import': 'Nhập tệp'
+  'note.import': 'Nhập tệp',
+
+  // ── Mẫu (template) ──────────────────────────────────────────────────────────
+  'template.overwriteConfirm': 'Thay toàn bộ nội dung hiện tại bằng mẫu này? Không thể hoàn tác.'
 };
