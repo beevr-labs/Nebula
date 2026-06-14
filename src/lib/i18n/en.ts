@@ -95,6 +95,7 @@ export const en: Dict = {
   'ask.noResults': "I couldn't find anything about that in your notes.",
   'ask.emptyAnswer':
     "I found relevant notes but couldn't compose an answer this time — see the sources below, or try rephrasing the question.",
+  'ask.notFoundSubject': 'Couldn’t find “{name}” in your notes.',
 
   // mode chips (plain labels by default; technical names in advanced mode)
   'mode.reason': 'Think it through',

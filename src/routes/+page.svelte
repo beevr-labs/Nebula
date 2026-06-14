@@ -98,6 +98,7 @@
     referencesFromHits,
     relevantHits,
     restrictToEntities,
+    ungroundedSubjects,
     withLexicalChannel,
     type SourceRef
   } from '$lib/retrieval/search';
@@ -544,6 +545,7 @@
           noResultsMessage?: string;
           emptyAnswerMessage?: string;
           history?: { query: string; answer: string }[];
+          absentSubjects?: string[];
         },
         onTok: (t: string) => void,
         sig: AbortSignal
@@ -2088,6 +2090,28 @@
       const graphAdded = hits.filter((h) => expandedIds.has(h.chunkId)).length;
       graphInfo = graphAdded > 0 ? `+${graphAdded} graph-connected` : '';
       references = referencesFromHits(hits);
+      // Named subjects the question is ABOUT that are grounded NOWHERE the model can see — not a known
+      // graph entity, not in any retrieved note (a 2–4-word capitalized name; empty for a normal query).
+      const absentSubjects = ungroundedSubjects(
+        q,
+        hits.map((h) => vault.find((n) => n.docId === h.docId)?.text ?? h.text),
+        entityIndex.map((e) => e.name)
+      );
+      // GROUNDED — hard stop (FR-CHAT-002): grounded's contract is "answer ONLY from the notes", so an
+      // absent named subject IS "not found". Returning here stops a small model fabricating by lifting a
+      // DIFFERENT subject's details for the missing name. REASON is EXEMPT (it may use outside
+      // knowledge): it does NOT block — `absentSubjects` is passed to generate() below as a grounding
+      // hint so it says the name isn't in the notes instead of inventing a role, while staying free to
+      // reason about it (a book, a public figure). No-op when no name is absent (recall-safe).
+      if (answerMode === 'grounded' && absentSubjects.length > 0) {
+        answer = t('ask.notFoundSubject', { name: absentSubjects.join(', ') });
+        hits = [];
+        references = [];
+        cites = [];
+        graph = null;
+        status = 'done';
+        return;
+      }
       // Micro-Map (FR-GRAPH-001) + persist the retrieval sub-graph edges (FR-GRAPH-002).
       graph = buildMicroGraph(q, hits, { graphInfo: graphShared });
       try {
@@ -2137,7 +2161,10 @@
           // even for English notes/questions (the no-results line is localized too).
           answerLanguage: SUPPORTED.find((l) => l.code === getLocale())?.label,
           noResultsMessage: t('ask.noResults'),
-          emptyAnswerMessage: t('ask.emptyAnswer')
+          emptyAnswerMessage: t('ask.emptyAnswer'),
+          // REASON-mode grounding hint (empty in grounded — it hard-stops above): tell the model which
+          // named subjects aren't in the notes so it won't fabricate a role for them.
+          absentSubjects
         },
         (t) => {
           answer += t;

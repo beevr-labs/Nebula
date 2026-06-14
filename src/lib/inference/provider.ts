@@ -30,6 +30,11 @@ export interface GenerateRequest {
   // Empty/omitted for the first question. Each turn's grounding context is NOT re-sent — only the
   // running dialogue — while THIS turn carries its own freshly-retrieved context.
   history?: { query: string; answer: string }[];
+  // Named subjects in the question that appear NOWHERE in the user's notes (computed upstream). In
+  // REASON mode these are passed as a grounding hint so the model says they're not in the notes and
+  // never lifts a different note-subject's details for them, while still being free to reason from
+  // general knowledge. (GROUNDED mode hard-stops upstream, so this is empty there.)
+  absentSubjects?: string[];
 }
 
 export interface GenerateResult {

@@ -95,6 +95,7 @@ export const vi: Dict = {
   'ask.noResults': 'Tôi không tìm thấy gì về điều đó trong ghi chú của bạn.',
   'ask.emptyAnswer':
     'Tôi tìm thấy ghi chú liên quan nhưng lần này chưa soạn được câu trả lời — xem các nguồn bên dưới, hoặc thử diễn đạt lại câu hỏi.',
+  'ask.notFoundSubject': 'Không tìm thấy “{name}” trong ghi chú của bạn.',
 
   'mode.reason': 'Suy luận giúp tôi',
   'mode.reasonAdv': 'Suy luận',

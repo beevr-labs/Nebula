@@ -18,6 +18,7 @@ export const SYSTEM_PROMPT = `You are Nebula's helpful local assistant. Answer t
 - After a claim, cite the chunk number it came from, inline, like [#2] or [#1][#3]. Never cite a number that is not in the list below.
 - If the notes only partly cover the question, answer what you reasonably can from them and briefly note what's missing — do NOT refuse outright.
 - Only if the notes contain nothing at all related to the question, say so in one plain, friendly sentence. Never use outside knowledge or invent citations.
+- If the question is about a specific named person, project, or term that does NOT appear in the context, say you can't find that name in the notes — never attribute another person's or another project's details to it.
 - If you think privately before answering, you MUST still write the full answer out afterward as ordinary text — never stop after thinking and never leave the final answer empty.
 - Respond with the ANSWER ONLY. Never repeat the question and never print headers or labels like "Notes:", "Question:", "# Question", or "# Answer".`;
 
@@ -32,6 +33,7 @@ export const SYSTEM_PROMPT_REASON = `You are Nebula's local knowledge assistant.
 - Ground your answer in the numbered context from their notes, and REASON with it: connect ideas across notes, draw sensible inferences, work through the question step by step, and apply relevant general knowledge to give a complete, practical answer.
 - Cite the chunk number after any fact taken FROM the notes, inline like [#2] or [#1][#3]. Reasoning or general knowledge you add yourself does not need a citation, but it must stay consistent with the notes and never contradict them. Never cite a number not in the list below.
 - Use the notes as far as they go, then reason about the rest. Prefer a real, useful answer over "the notes don't say." Be clear about anything you are inferring rather than reading directly from the notes.
+- But if the question asks about a specific named person, project, or term that is not in the notes, say it isn't in your notes — never attribute another note's person or project details to a name that isn't there.
 - If you think privately before answering, you MUST still write the full answer out afterward as ordinary text — never stop after thinking and never leave the final answer empty.
 - Respond with the ANSWER ONLY. Never repeat the question and never print headers or labels like "Notes:", "Question:", "# Question", or "# Answer".`;
 
@@ -57,6 +59,22 @@ export interface AssembleOptions {
   // so a Vietnamese UI always gets a Vietnamese answer even for English notes/questions. Omitted →
   // the system prompt's default behavior (reply in the question's language) is unchanged.
   answerLanguage?: string;
+  // Named subjects the question asks about that appear NOWHERE in the user's notes. When set, a
+  // turn-specific GROUNDING NOTE is appended to the system prompt so the model won't fabricate a role
+  // for them or confuse them with a real note-subject — used by REASON mode (which doesn't hard-stop).
+  absentSubjects?: string[];
+}
+
+/** Turn-specific grounding hint: names the question asks about that aren't in the notes, so the model
+ *  states that plainly instead of borrowing a different note-subject's details (anti-hallucination). */
+export function groundingHint(absentSubjects: string[]): string {
+  const names = absentSubjects.map((s) => `"${s}"`).join(', ');
+  return (
+    `GROUNDING NOTE: the following name(s) do NOT appear anywhere in the user's notes: ${names}. ` +
+    `Do not claim or imply they have any role, task, or attribute from the notes, and never confuse ` +
+    `them with a different person or project that IS in the notes. If the question is about such a ` +
+    `name, say plainly it isn't in the notes — you may then reason from general knowledge if it helps.`
+  );
 }
 
 /** The system-prompt override that pins the answer to one language (UI-locale driven). */
@@ -66,6 +84,22 @@ export function languageDirective(language: string): string {
     `language instruction below: answer in ${language} even if the notes or the question are written ` +
     `in a different language. Keep proper nouns and code as-is.`
   );
+}
+
+/**
+ * Final language reminder, written IN the target language, appended as the LAST line of the user turn
+ * (the position a model weights most as it starts generating). A reminder in the target language
+ * anchors output far better than an English "answer in Vietnamese" instruction, which small on-device
+ * models leak past — especially on "this isn't in your notes" answers, where the model's meta/reasoning
+ * register otherwise defaults to English (the EN/VI mix bug). Falls back to an English line for a
+ * language without a native reminder here. Keyed by the SUPPORTED `label` the UI passes as answerLanguage.
+ */
+const LANG_REMINDER: Record<string, string> = {
+  Vietnamese: 'Viết toàn bộ câu trả lời bằng tiếng Việt, không chèn tiếng Anh.',
+  English: 'Write your entire answer in English.'
+};
+export function languageReminder(language: string): string {
+  return LANG_REMINDER[language] ?? `Write your entire answer in ${language}.`;
 }
 
 function chunkBlock(hit: SearchHit, n: number): string {
@@ -195,15 +229,22 @@ export function assemblePrompt(
   // were English; this in-turn reminder makes the UI language stick.
   if (opts.answerLanguage) directive += `, written entirely in ${opts.answerLanguage}`;
   // Omit the empty "Notes:" scaffold when there is no context, so the model isn't told to read notes that aren't there.
-  const user = hasContext
+  let user = hasContext
     ? `Notes:\n${blocks}\n\n${directive}: ${query}`
     : `${directive}: ${query}`;
+  // Append the language reminder IN the target language as the final line — the strongest anchor against
+  // the EN/VI mix (the English language-directive alone leaks on meta/"not in notes" reason answers).
+  if (opts.answerLanguage) user += `\n\n${languageReminder(opts.answerLanguage)}`;
   const base = mode === 'reason' ? SYSTEM_PROMPT_REASON : SYSTEM_PROMPT;
   // Pin the answer language (UI locale) by prepending a strong override; left untouched when omitted so
   // the default "reply in the question's language" rule (and the prompt-equality tests) still hold.
-  const system = opts.answerLanguage
+  let system = opts.answerLanguage
     ? `${languageDirective(opts.answerLanguage)}\n\n${base}`
     : base;
+  // Append the turn-specific grounding hint (reason mode's soft anti-hallucination): names the question
+  // asks about that aren't in the notes, so the model states that instead of fabricating a role.
+  if (opts.absentSubjects && opts.absentSubjects.length > 0)
+    system = `${system}\n\n${groundingHint(opts.absentSubjects)}`;
 
   return { kind: 'grounded', system, user, contextOrder };
 }

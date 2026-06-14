@@ -389,6 +389,61 @@ export function restrictToEntities<T extends { chunkId: string; docId: string; s
 }
 
 /**
+ * Proper-noun SUBJECTS a query is ABOUT — capitalized phrases of 2–4 words (e.g. "Hoàng Lâm",
+ * "Ngọc Anh", "Project Harmony", "Why We Sleep"). These name the specific person/entity the question
+ * targets, so we can verify the subject is actually in the notes before answering — the signal that
+ * separates a real "who is X / what does X do" from a question about someone who isn't in the vault.
+ * Unicode-aware (matches accented Vietnamese capitals). Bounded 2–4 words on purpose: ≥2 excludes a
+ * sentence-initial cap or a lone Capitalized common word; ≤4 excludes a long Title-Cased RUN (a user
+ * who Capitalizes Every Word of their question), which is a sentence, not a subject — so the guard
+ * never blocks it. Deduped (accent-folded), original case preserved.
+ */
+export function namedSubjects(query: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const re = /\p{Lu}[\p{L}]*(?:\s+\p{Lu}[\p{L}]*)+/gu;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(query)) !== null) {
+    const phrase = m[0].trim();
+    const wordCount = phrase.split(/\s+/).length;
+    if (wordCount < 2 || wordCount > 4) continue; // a name is short; a longer run is a Title-Cased sentence
+    const key = foldDiacritics(phrase);
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(phrase);
+    }
+  }
+  return out;
+}
+
+/**
+ * Named subjects from the query that are GROUNDED NOWHERE — neither a known graph entity nor present
+ * (accent-insensitive) in any retrieved note the model will see. Anti-hallucination guard (FR-CHAT-002):
+ * when a question is about a specific named subject and EVERY such subject is ungrounded, the honest
+ * reply is "not found" — returning them lets the caller say so instead of letting a small model
+ * fabricate by lifting a DIFFERENT subject's details (the fake-name failure: "what is <person not in
+ * the vault>'s role" → it borrows someone else's role). Recall-safe: empty when the query names no
+ * such subject, or when ANY named subject IS grounded (so a query mixing a real + unknown name still
+ * answers the real part). `entityNames` shorter than 3 chars are ignored to avoid spurious substring hits.
+ */
+export function ungroundedSubjects(
+  query: string,
+  contextTexts: string[],
+  entityNames: string[]
+): string[] {
+  const subjects = namedSubjects(query);
+  if (subjects.length === 0) return [];
+  const hay = foldDiacritics(contextTexts.join('\n'));
+  const ents = entityNames.map(foldDiacritics).filter((e) => e.length >= 3);
+  const ungrounded = subjects.filter((s) => {
+    const sf = foldDiacritics(s);
+    const inEntities = ents.some((e) => e.includes(sf) || sf.includes(e));
+    return !inEntities && !hay.includes(sf);
+  });
+  return ungrounded.length === subjects.length ? ungrounded : [];
+}
+
+/**
  * Keep the single best (first) hit per document, preserving rank order (FR-RET-001). Used to
  * favor breadth across DISTINCT relevant documents — so a grounded answer synthesizes from
  * several notes at once instead of multiple chunks of the same one. `maxDocs` caps the count.

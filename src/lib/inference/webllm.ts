@@ -214,7 +214,8 @@ export class WebLLMProvider implements InferenceProvider {
       // WORD budget sized to fit the model's real-token window after the system prompt + answer.
       maxContextTokens: contextWordBudget(req.maxTokens),
       mode: req.answerMode,
-      answerLanguage: req.answerLanguage // pin the answer to the UI language when set
+      answerLanguage: req.answerLanguage, // pin the answer to the UI language when set
+      absentSubjects: req.absentSubjects // reason-mode grounding hint for names not in the notes
     });
     if (prompt.kind === 'no_results') {
       return {
