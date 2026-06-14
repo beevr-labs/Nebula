@@ -17,6 +17,7 @@ const K_VIEW = `${NS}.view`;
 const K_THEME = `${NS}.theme`;
 const K_ADVANCED = `${NS}.advanced`;
 const K_LOCALE = `${NS}.locale`;
+const K_PANES = `${NS}.panes`;
 
 function store(): Storage | null {
   try {
@@ -112,6 +113,24 @@ export function getLocale(): string | null {
 }
 export function setLocale(locale: string): void {
   if (locale && locale.trim()) write(K_LOCALE, locale);
+}
+
+/** Resizable workspace panes (FR-UI-001): sidebar + ask-rail widths in px and ask-rail visibility.
+ *  Persisted so the layout survives a refresh; `null` → use the built-in defaults. */
+export type Panes = { sideW: number; askW: number; askOpen: boolean };
+export function getPanes(): Panes | null {
+  const raw = read(K_PANES);
+  if (!raw) return null;
+  try {
+    const o = JSON.parse(raw);
+    if (o && typeof o === 'object') return o as Panes;
+  } catch {
+    /* corrupt JSON → fall back to defaults */
+  }
+  return null;
+}
+export function setPanes(p: Panes): void {
+  write(K_PANES, JSON.stringify(p));
 }
 
 /** Advanced mode — surfaces the technical metrics (GPU/CPU speed, answer latency & throughput,

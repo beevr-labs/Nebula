@@ -54,6 +54,8 @@ export const en: Dict = {
   'ask.scopeAll': 'all notes',
   'ask.new': 'New',
   'ask.newTip': 'Start a new conversation',
+  'ask.toggle': 'Toggle the Ask panel',
+  'ask.resize': 'Drag to resize',
   'ask.idle':
     'Ask anything about your notes. Answers come only from what you’ve written, and link back to where each fact came from.',
   'ask.try': 'Try',

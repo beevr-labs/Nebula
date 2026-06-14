@@ -54,6 +54,8 @@ export const vi: Dict = {
   'ask.scopeAll': 'tất cả ghi chú',
   'ask.new': 'Mới',
   'ask.newTip': 'Bắt đầu cuộc trò chuyện mới',
+  'ask.toggle': 'Bật/tắt khung Hỏi',
+  'ask.resize': 'Kéo để đổi kích cỡ',
   'ask.idle':
     'Hỏi bất cứ điều gì về ghi chú của bạn. Câu trả lời chỉ lấy từ những gì bạn đã viết, và dẫn ngược về nơi tìm thấy mỗi thông tin.',
   'ask.try': 'Thử hỏi',

@@ -343,6 +343,45 @@
     advanced = !advanced;
     uiPrefs.setAdvanced(advanced);
   }
+
+  // Resizable workspace panes (FR-UI-001): sidebar + ask-rail widths (px) and ask-rail visibility.
+  // Drag the dividers between columns to resize; Ctrl/Cmd+J (or the topbar/rail buttons) toggles the
+  // ask rail. Widths feed the .body grid via `bodyCols`. Persisted in ui-prefs, restored in onMount.
+  let sideW = $state(232);
+  let askW = $state(384);
+  let askOpen = $state(true);
+  const bodyCols = $derived(
+    askOpen ? `${sideW}px 6px minmax(0, 1fr) 6px ${askW}px` : `${sideW}px 6px minmax(0, 1fr)`
+  );
+  const persistPanes = () => uiPrefs.setPanes({ sideW, askW, askOpen });
+  function startResize(which: 'side' | 'ask', e: PointerEvent) {
+    e.preventDefault();
+    const startX = e.clientX;
+    const s0 = sideW;
+    const a0 = askW;
+    const onMove = (ev: PointerEvent) => {
+      const dx = ev.clientX - startX;
+      if (which === 'side') sideW = Math.max(180, Math.min(s0 + dx, 460));
+      else askW = Math.max(300, Math.min(a0 - dx, 680)); // dragging left widens the right rail
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      document.body.style.cursor = '';
+      persistPanes();
+    };
+    document.body.style.cursor = 'col-resize';
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+  function toggleAsk() {
+    askOpen = !askOpen;
+    persistPanes();
+    if (askOpen)
+      void tick().then(() =>
+        document.querySelector<HTMLTextAreaElement>('.composer-box textarea')?.focus()
+      );
+  }
   let entityQuery = $state(''); // filter box for the Graph-mode entity list
 
   // Empty folders the user created (folders are otherwise derived from note paths) — persisted in
@@ -512,6 +551,14 @@
     coi = crossOriginIsolated;
     theme = uiPrefs.getTheme();
     advanced = uiPrefs.getAdvanced();
+    {
+      const panes = uiPrefs.getPanes();
+      if (panes) {
+        if (typeof panes.sideW === 'number') sideW = panes.sideW;
+        if (typeof panes.askW === 'number') askW = panes.askW;
+        if (typeof panes.askOpen === 'boolean') askOpen = panes.askOpen;
+      }
+    }
     // Probe WebGPU once at startup (FR-CAP-001, ADR-030): is chat possible and on what GPU? Drives the
     // GPU status line + the model recommendation. (We deliberately do NOT read maxBufferSize as a load
     // cap — WebLLM shards weights across buffers, so large models load fine on capable GPUs.)
@@ -2417,6 +2464,10 @@
     if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'o')) {
       e.preventDefault();
       void openSwitcher();
+    } else if ((e.ctrlKey || e.metaKey) && (e.key === 'j' || e.key === 'J')) {
+      // ⌘J / Ctrl+J — toggle the ask rail (jump to Ask when opening). The start-here note advertises it.
+      e.preventDefault();
+      toggleAsk();
     } else if (e.key === 'Escape') {
       switcherOpen = false;
       wlState = null;
@@ -2504,6 +2555,7 @@
       />
     {:else if name === 'send'}<path d="M3 8h8" /><polyline points="7.5,4.5 11,8 7.5,11.5" />
     {:else if name === 'bolt'}<path d="M9 2L4 9h3l-1 5 5-7H8z" />
+    {:else if name === 'panel'}<rect x="2.5" y="3" width="11" height="10" rx="1.5" /><line x1="9.5" y1="3" x2="9.5" y2="13" />
     {:else if name === 'menu'}<line x1="2.5" y1="4.5" x2="13.5" y2="4.5" /><line
         x1="2.5"
         y1="8"
@@ -2644,6 +2696,14 @@
         <span class="pill warn-pill" title={t('topbar.slowerTip')}>{t('topbar.slower')}</span>
       {/if}
       <button
+        class="icon-btn nb-hov nb-press"
+        class:active={askOpen}
+        onclick={toggleAsk}
+        title={t('ask.toggle')}
+        aria-label={t('ask.toggle')}
+        aria-pressed={askOpen}>{@render ic('panel', 16)}</button
+      >
+      <button
         class="icon-btn lang-btn nb-hov nb-press"
         onclick={cycleLocale}
         title={t('topbar.language')}
@@ -2702,7 +2762,7 @@
   {/if}
 
   <!-- ───────── BODY: sidebar · center · ask rail ───────── -->
-  <div class="body">
+  <div class="body" style="grid-template-columns: {bodyCols};">
     <!-- SIDEBAR -->
     <aside
       class="sidebar"
@@ -2849,6 +2909,15 @@
         </div>
       </div>
     </aside>
+
+    <!-- divider: sidebar <-> center -->
+    <div
+      class="pane-divider"
+      role="separator"
+      aria-orientation="vertical"
+      title={t('ask.resize')}
+      onpointerdown={(e) => startResize('side', e)}
+    ></div>
 
     <!-- CENTER -->
     <section class="center">
@@ -3218,6 +3287,15 @@
     </section>
 
     <!-- ASK RAIL -->
+    {#if askOpen}
+    <!-- divider: center <-> ask rail -->
+    <div
+      class="pane-divider"
+      role="separator"
+      aria-orientation="vertical"
+      title={t('ask.resize')}
+      onpointerdown={(e) => startResize('ask', e)}
+    ></div>
     <aside class="rail">
       <div class="rail-head">
         <span class="rail-title">{t('ask.title')}</span>
@@ -3234,7 +3312,12 @@
             title={t('ask.newTip')}>{@render ic('plus', 13)} {t('ask.new')}</button
           >
         {/if}
-        <kbd>⌘J</kbd>
+        <button
+          class="rail-x nb-hov"
+          onclick={toggleAsk}
+          title={t('ask.toggle')}
+          aria-label={t('ask.toggle')}>{@render ic('close', 13)}<kbd>⌘J</kbd></button
+        >
       </div>
 
       <div class="rail-body">
@@ -3421,6 +3504,7 @@
         </div>
       </div>
     </aside>
+    {/if}
   </div>
 
   <input
@@ -4139,12 +4223,48 @@
     opacity: 0.8;
   }
 
-  /* body grid */
+  /* body grid — column widths are set inline via `bodyCols` (resizable, FR-UI-001); this is a fallback. */
   .body {
     flex: 1;
     display: grid;
     grid-template-columns: 232px 1fr 384px;
     min-height: 0;
+  }
+  /* Drag handles between columns: a thin strip with a hairline that highlights on hover/drag. */
+  .pane-divider {
+    position: relative;
+    cursor: col-resize;
+    background: transparent;
+    z-index: 5;
+    touch-action: none;
+  }
+  .pane-divider::after {
+    content: '';
+    position: absolute;
+    inset: 0 2px;
+    border-radius: 2px;
+    background: var(--line);
+    transition: background 0.12s ease;
+  }
+  .pane-divider:hover::after,
+  .pane-divider:active::after {
+    background: var(--accent);
+  }
+  /* Ask-rail collapse button in the rail header. */
+  .rail-x {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    border: none;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    padding: 3px 5px;
+    border-radius: 6px;
+    font: inherit;
+  }
+  .rail-x:hover {
+    color: var(--ink);
   }
 
   /* sidebar */
