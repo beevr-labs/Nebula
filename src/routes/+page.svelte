@@ -1875,8 +1875,16 @@
     // active tab. We just drop any stale Magic-Jump highlight so the note shows in full.
     activeSpan = null;
     try {
+      // Follow-up resolution at RETRIEVAL time (companion to FR-CHAT-006): a follow-up like "and why?"
+      // or "who runs it?" names its subject only in a PRIOR turn, so embedding/lexical/entity-anchor on
+      // the current question alone retrieves nothing (the pronoun carries no content). Prepend the recent
+      // turns' QUESTIONS (not answers — those dilute) so these signals see the named subject (e.g.
+      // "Zephyr") the way generation already does via `history`. Bounded to the last 2 turns so a topic
+      // switch isn't dragged back to an old subject; a no-op on the first turn (history empty), so
+      // single-shot retrieval precision is unchanged.
+      const qCtx = history.length ? [...history.slice(-2).map((h) => h.query), q].join('\n') : q;
       status = 'embedding query…';
-      const qv = await pipe.embed(q);
+      const qv = await pipe.embed(qCtx);
       status = scope ? `retrieving (scoped: ${scopeLabel(scope)})…` : 'retrieving…';
       graphInfo = '';
       // Scoped retrieval (FR-RET-004): over-fetch then keep only in-scope hits so a question
@@ -1889,7 +1897,7 @@
       // proper noun the embedding fragments) reaches the context even when cosine ranked it outside
       // top-K — hybridRerank alone can't recover those (it only re-orders what vector returned).
       // Best-effort: a lexical failure must never take down the ask.
-      const qTerms = queryTerms(q);
+      const qTerms = queryTerms(qCtx);
       const lexical = qTerms.length
         ? filterByScope(await pipe.lexical(qv, qTerms, 8).catch(() => [] as SearchHit[]), scopeIds)
         : [];
@@ -1949,7 +1957,7 @@
       // before the model ever sees it (precision must not depend on the LLM ignoring noise). A strong
       // standalone semantic match still survives; and it's a NO-OP when the query names no known
       // entity (or the graph isn't built yet), so recall is preserved.
-      const anchorDocs = entityAnchorDocs(q, entityIndex);
+      const anchorDocs = entityAnchorDocs(qCtx, entityIndex);
       const denoised = restrictToEntities(reranked, anchorDocs);
       // Favor BREADTH across distinct documents (FR-CHAT-002): one best chunk per doc. GraphRAG gets
       // more room (8 docs) so the graph-connected siblings actually surface alongside the seeds.
