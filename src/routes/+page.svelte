@@ -9,7 +9,8 @@
   import 'katex/dist/katex.min.css'; // self-hosted math styles + fonts (bundled, zero external calls)
   import { onMount, tick } from 'svelte';
   import Coachmarks, { type Step as CoachStep } from '$lib/onboard/Coachmarks.svelte';
-  import { t, getLocale, cycleLocale, SUPPORTED } from '$lib/i18n/i18n.svelte';
+  import { getSeed, TOUR_DOC } from '$lib/onboard/seed';
+  import { t, getLocale, cycleLocale, setLocale, SUPPORTED } from '$lib/i18n/i18n.svelte';
   import type { SearchHit } from '$lib/inference/provider';
   import type { NoteRecord, ExpandedHit } from '$lib/db/store';
   import { buildTitleIndex, notePreview } from '$lib/weave/weaver';
@@ -23,7 +24,7 @@
     type IngestGraphResult,
     type VaultGraphProgress
   } from '$lib/graph/ingest-graph';
-  import type { Extraction, ExtractedRelation } from '$lib/graph/entities';
+  import type { Extraction } from '$lib/graph/entities';
   import { buildEntityIndex, type EntityEntry } from '$lib/graph/entity-index';
   import { buildEntityGraph, type EntityGraph, type GraphNeighbor } from '$lib/graph/entity-graph';
   import type { EntityRecord, RelationEdge } from '$lib/graph/types';
@@ -127,291 +128,17 @@
   };
   type Cite = { n: number; chunkId: string; docId: string };
 
-  // Demo vault — a friendly, two-topic onboarding TOUR for a brand-new user. Two little notebooks with
-  // NO shared entities ("Japan trip with friends" in trip/ and a "sleep research" notebook in
-  // research/) so Scope isolates them cleanly; within each, notes share people/places/ideas but few
-  // words, so GraphRAG + Reason connect them the way keyword search can't (e.g. "Sakura Inn" links the
-  // Kyoto note to the budget note). `start-here` is the guided tour itself. Only seeds an empty vault;
-  // real notes are never touched — the user can delete all of this and start their own.
-  const TOUR_DOC = 'start-here.md'; // the onboarding tour note — visible/editable but NOT RAG-indexed
-  const SEED: Note[] = [
-    {
-      docId: 'start-here.md',
-      title: '👋 Start here',
-      aliases: ['Welcome', 'Start', 'Tour'],
-      text: `# 👋 Welcome to Nebula
-
-Nebula turns your notes into something you can **ask** — and everything runs **on your device**, so nothing ever leaves your computer.
-
-This demo has two little notebooks so you can see what it does: a **Japan trip** with friends (\`trip/\`) and a **sleep research** notebook (\`research/\`). Try the things below, then delete it all and make it your own.
-
-## 1 · Ask your notes  (press ⌘J)
-- **Synthesize across notes:** *"What do Maya, Leo and Priya each want to do in Japan?"*
-- **Add up the numbers:** *"How much is the Japan trip budget per person — flights, hotels, food and JR Pass?"*
-- **Get advice, not just quotes** (turn on **Think it through**): *"Based on my sleep notes on caffeine, melatonin and the circadian rhythm, what should I change in my routine?"*
-- **Follow up:** after an answer, ask *"and why?"* — it remembers the conversation.
-- **Cited & verifiable:** answers show [#1] markers — click one to jump to the exact note.
-
-## 2 · See how your notes connect
-Nebula links your notes through shared **people, places and topics**, even when they share no words.
-- In the sidebar under **People, places & topics**, open one like **Maya** or **caffeine** — you'll see every note connected to it.
-- In Ask, try *"What is Maya planning in Tokyo, Kyoto and Osaka?"* — it gathers every note she appears in.
-
-## 3 · Keep topics apart
-Set the search to **trip/** and ask *"Summarize the Japan trip — Tokyo, Kyoto and Osaka"* — you'll only ever get trip notes, never your research.
-
-## 4 · Make it yours
-- **New note** to write; link notes with \`[[double brackets]]\`; tag with \`#hashtags\`.
-- Drop in a **PDF or CSV** and it becomes searchable too.
-
-#welcome`
-    },
-
-    // ── Japan trip with friends ───────────────────────────────────────────────
-    {
-      docId: 'trip/overview.md',
-      title: 'Japan trip — overview',
-      aliases: ['Japan trip', 'Japan'],
-      text: 'Our 10-day Japan trip in April with Maya, Leo and Priya. The route is Tokyo → Kyoto → Osaka, plus a day trip to [[Hakone]]. Flights are booked and the budget target is about $1,900 each. #japan #trip'
-    },
-    {
-      docId: 'trip/tokyo.md',
-      title: 'Tokyo',
-      aliases: ['Tokyo', 'Shinjuku'],
-      text: 'In Tokyo (3 nights) we stay in Shinjuku. Maya wants teamLab Planets and Leo wants the Tsukiji fish market. From here we take a day trip to [[Hakone]]. #japan'
-    },
-    {
-      docId: 'trip/kyoto.md',
-      title: 'Kyoto',
-      aliases: ['Kyoto', 'Sakura Inn', 'ryokan'],
-      text: 'Kyoto (4 nights) is the temple leg: Fushimi Inari at dawn and the Arashiyama bamboo grove. Priya booked a traditional ryokan called Sakura Inn for two of the nights. #japan'
-    },
-    {
-      docId: 'trip/osaka.md',
-      title: 'Osaka',
-      aliases: ['Osaka', 'Dotonbori'],
-      text: 'Osaka (2 nights) is the food leg — Dotonbori street food and okonomiyaki. Leo is our foodie and is planning this part. #japan'
-    },
-    {
-      docId: 'trip/hakone.md',
-      title: 'Hakone day trip',
-      aliases: ['Hakone'],
-      text: 'A day trip to Hakone from Tokyo: Lake Ashi, the open-air museum and an onsen. Note: Maya is allergic to eggs, so we skip the famous black eggs. #japan'
-    },
-    {
-      docId: 'trip/budget.md',
-      title: 'Trip budget',
-      aliases: ['budget', 'JR Pass'],
-      text: 'Budget per person: flights $700, hotels $500, food $400, and a JR Pass for transport $300 — that comes to about $1,900 each. Maya already paid the Sakura Inn deposit of $150 on behalf of the group. #japan #money'
-    },
-    {
-      docId: 'trip/preferences.md',
-      title: 'What everyone wants',
-      aliases: ['preferences'],
-      text: 'Maya loves art and quiet temples. Leo lives for food and nightlife. Priya wants culture and shopping. We try to fit one thing for each person into every day. #japan'
-    },
-
-    // ── Sleep research notebook ───────────────────────────────────────────────
-    {
-      docId: 'research/overview.md',
-      title: 'Sleep — overview',
-      aliases: ['sleep', 'sleep research'],
-      text: 'Notes on why sleep works the way it does. Two systems drive it: the circadian rhythm (a daily body clock) and sleep pressure (a chemical that builds up while you are awake). #sleep #research'
-    },
-    {
-      docId: 'research/circadian.md',
-      title: 'Circadian rhythm',
-      aliases: ['circadian rhythm', 'circadian', 'SCN'],
-      text: 'The circadian rhythm is a ~24-hour clock set mainly by light and run by the SCN in the hypothalamus. Morning light shifts it earlier; bright evening light shifts it later. #sleep'
-    },
-    {
-      docId: 'research/adenosine.md',
-      title: 'Sleep pressure & adenosine',
-      aliases: ['adenosine', 'sleep pressure'],
-      text: 'Sleep pressure comes from adenosine, which builds up in the brain the longer you stay awake and makes you drowsy. It clears out again while you sleep. #sleep'
-    },
-    {
-      docId: 'research/caffeine.md',
-      title: 'Caffeine',
-      aliases: ['caffeine', 'coffee'],
-      text: 'Caffeine works by blocking adenosine receptors, masking drowsiness. Its half-life is about 5–6 hours, so an afternoon coffee can still be active at bedtime. #sleep'
-    },
-    {
-      docId: 'research/melatonin.md',
-      title: 'Melatonin',
-      aliases: ['melatonin', 'pineal gland'],
-      text: 'Melatonin is released by the pineal gland when it gets dark and signals "night" to the body. Bright light in the evening suppresses it and pushes sleep later. #sleep'
-    },
-    {
-      docId: 'research/why-we-sleep.md',
-      title: 'Why We Sleep (notes)',
-      aliases: ['Matthew Walker', 'Why We Sleep'],
-      text: 'From "Why We Sleep" by Matthew Walker: deep NREM sleep helps consolidate memories, while REM sleep supports emotional regulation — both stages matter. #sleep #book'
-    },
-    {
-      docId: 'research/takeaways.md',
-      title: 'Sleep — what to actually do',
-      aliases: ['sleep tips', 'takeaways'],
-      text: 'Putting it together: get morning sunlight (it sets the circadian rhythm), stop caffeine after about 2 PM (its half-life is long), and dim the lights at night (to protect melatonin). #sleep'
-    }
-  ];
-
-  // A HAND-AUTHORED knowledge graph for the seed notes (FR-GRAPH-001), keyed by docId. Seeding this
-  // directly means a first-run user sees the full entity graph INSTANTLY — without loading the chat
-  // model and running LLM extraction. Each entity name must appear (as a substring) in its note's
-  // text so the chunk-level mention edges attach; entities sharing a name across notes merge into one
-  // node (e.g. "Sakura Inn" links Kyoto↔budget; "Maya" is a hub; "adenosine" links the caffeine note
-  // to the sleep-pressure note) — the same cross-note links GraphRAG rides on. The two topics share
-  // NO entities, so the graph stays cleanly split between trip/ and research/.
-  const r = (source: string, target: string, type: string): ExtractedRelation => ({
-    source,
-    target,
-    type,
-    confidence: 0.95
-  });
-  const SEED_GRAPH: Record<string, Extraction> = {
-    'trip/overview.md': {
-      entities: [
-        { name: 'Maya', type: 'person' },
-        { name: 'Leo', type: 'person' },
-        { name: 'Priya', type: 'person' },
-        { name: 'Tokyo', type: 'place' },
-        { name: 'Kyoto', type: 'place' },
-        { name: 'Osaka', type: 'place' },
-        { name: 'Hakone', type: 'place' }
-      ],
-      relations: []
-    },
-    'trip/tokyo.md': {
-      entities: [
-        { name: 'Tokyo', type: 'place' },
-        { name: 'Shinjuku', type: 'place' },
-        { name: 'Maya', type: 'person' },
-        { name: 'teamLab Planets', type: 'place' },
-        { name: 'Leo', type: 'person' },
-        { name: 'Tsukiji', type: 'place' },
-        { name: 'Hakone', type: 'place' }
-      ],
-      relations: [
-        r('Maya', 'teamLab Planets', 'wants_to_visit'),
-        r('Leo', 'Tsukiji', 'wants_to_visit')
-      ]
-    },
-    'trip/kyoto.md': {
-      entities: [
-        { name: 'Kyoto', type: 'place' },
-        { name: 'Fushimi Inari', type: 'place' },
-        { name: 'Arashiyama', type: 'place' },
-        { name: 'Priya', type: 'person' },
-        { name: 'Sakura Inn', type: 'org' }
-      ],
-      relations: [r('Priya', 'Sakura Inn', 'booked'), r('Sakura Inn', 'Kyoto', 'located_in')]
-    },
-    'trip/osaka.md': {
-      entities: [
-        { name: 'Osaka', type: 'place' },
-        { name: 'Dotonbori', type: 'place' },
-        { name: 'Leo', type: 'person' },
-        { name: 'food', type: 'concept' }
-      ],
-      relations: [r('Leo', 'Osaka', 'plans'), r('Leo', 'food', 'likes')]
-    },
-    'trip/hakone.md': {
-      entities: [
-        { name: 'Hakone', type: 'place' },
-        { name: 'Tokyo', type: 'place' },
-        { name: 'Lake Ashi', type: 'place' },
-        { name: 'Maya', type: 'person' }
-      ],
-      relations: [r('Hakone', 'Tokyo', 'day_trip_from')]
-    },
-    'trip/budget.md': {
-      entities: [
-        { name: 'Maya', type: 'person' },
-        { name: 'Sakura Inn', type: 'org' },
-        { name: 'JR Pass', type: 'other' }
-      ],
-      relations: [r('Maya', 'Sakura Inn', 'paid_deposit')]
-    },
-    'trip/preferences.md': {
-      entities: [
-        { name: 'Maya', type: 'person' },
-        { name: 'Leo', type: 'person' },
-        { name: 'Priya', type: 'person' },
-        { name: 'art', type: 'concept' },
-        { name: 'food', type: 'concept' },
-        { name: 'shopping', type: 'concept' }
-      ],
-      relations: [
-        r('Maya', 'art', 'likes'),
-        r('Leo', 'food', 'likes'),
-        r('Priya', 'shopping', 'likes')
-      ]
-    },
-    'research/overview.md': {
-      entities: [
-        { name: 'circadian rhythm', type: 'concept' },
-        { name: 'sleep pressure', type: 'concept' },
-        { name: 'sleep', type: 'concept' }
-      ],
-      relations: [
-        r('circadian rhythm', 'sleep', 'regulates'),
-        r('sleep pressure', 'sleep', 'regulates')
-      ]
-    },
-    'research/circadian.md': {
-      entities: [
-        { name: 'circadian rhythm', type: 'concept' },
-        { name: 'SCN', type: 'concept' },
-        { name: 'hypothalamus', type: 'place' },
-        { name: 'light', type: 'concept' }
-      ],
-      relations: [r('SCN', 'circadian rhythm', 'controls'), r('light', 'circadian rhythm', 'sets')]
-    },
-    'research/adenosine.md': {
-      entities: [
-        { name: 'sleep pressure', type: 'concept' },
-        { name: 'adenosine', type: 'concept' }
-      ],
-      relations: [r('adenosine', 'sleep pressure', 'causes')]
-    },
-    'research/caffeine.md': {
-      entities: [
-        { name: 'caffeine', type: 'concept' },
-        { name: 'adenosine', type: 'concept' }
-      ],
-      relations: [r('caffeine', 'adenosine', 'blocks')]
-    },
-    'research/melatonin.md': {
-      entities: [
-        { name: 'melatonin', type: 'concept' },
-        { name: 'pineal gland', type: 'concept' },
-        { name: 'light', type: 'concept' }
-      ],
-      relations: [r('pineal gland', 'melatonin', 'releases'), r('light', 'melatonin', 'suppresses')]
-    },
-    'research/why-we-sleep.md': {
-      entities: [
-        { name: 'Why We Sleep', type: 'other' },
-        { name: 'Matthew Walker', type: 'person' },
-        { name: 'NREM', type: 'concept' },
-        { name: 'REM', type: 'concept' }
-      ],
-      relations: [r('Matthew Walker', 'Why We Sleep', 'wrote')]
-    },
-    'research/takeaways.md': {
-      entities: [
-        { name: 'circadian rhythm', type: 'concept' },
-        { name: 'caffeine', type: 'concept' },
-        { name: 'melatonin', type: 'concept' }
-      ],
-      relations: []
-    }
-  };
+  // Onboarding seed — starter notebooks + a pre-built knowledge graph + the "Start here" tour note —
+  // now lives in $lib/onboard/seed.ts, localized EN/VI. It is DATA frozen at first-run in the language
+  // the user picked at the gate (see getSeed() at seed time below); UI labels stay reactive. The graph
+  // is hand-authored so a brand-new user sees the full entity map INSTANTLY, before any model loads.
 
   const MODELS = CHAT_MODELS; // curated tiny→large picker with VRAM labels + OOM guard (catalog.ts)
 
-  let vault = $state<Note[]>(SEED.map((n) => ({ ...n })));
+  // Initial in-memory vault for the chosen language. This is only what shows behind the first-run gate;
+  // the authoritative seed (persisted + indexed) is re-read from getSeed(getLocale()) once the gate
+  // closes, so a language switch at the gate is honored before anything is written.
+  let vault = $state<Note[]>(getSeed(getLocale()).notes.map((n) => ({ ...n })));
   let originals = $state<{ path: string; bytes: Uint8Array }[]>([]);
 
   // The Weaver's title index (FR-LINK-001) — rebuilds as the vault grows.
@@ -636,6 +363,9 @@ Set the search to **trip/** and ask *"Summarize the Japan trip — Tokyo, Kyoto 
   // Startup model gate (FR-MDL-005): on first run, choose which chat model to warm up in the
   // BACKGROUND before any Ask / build-graph, so generation is ready the moment it's first needed.
   let modelGate = $state(false);
+  // Resolves once the first-run gate is dismissed, letting onMount seed the demo in the language the
+  // user picked at the gate (set in closeModelGate). null when nothing is waiting on it.
+  let gateClosed: (() => void) | null = null;
   let wantBackgroundLoad = false; // a model was chosen before `pipe` existed → load once it's ready
   let cachedModels = $state<Set<string>>(new Set()); // model ids already downloaded to this browser
   let deletingModel = $state(''); // id mid-deletion (disables its row)
@@ -864,6 +594,11 @@ Set the search to **trip/** and ask *"Summarize the Japan trip — Tokyo, Kyoto 
       );
     };
 
+    // On first run the model gate is open; wait until the user dismisses it before seeding, because the
+    // language they pick there decides which demo notebooks + graph are frozen into the vault. Returning
+    // users are already onboarded → the gate never opens → this resolves immediately.
+    if (modelGate) await new Promise<void>((resolve) => { gateClosed = resolve; });
+
     // Rehydrate the vault from the persisted `note` table (FR-DATA-001). In the browser build there
     // are no `.md` files on disk, so this table IS the source of truth — without it every saved note
     // is lost on refresh. First run (empty table) → seed the demo notes, persist + index them once;
@@ -882,15 +617,16 @@ Set the search to **trip/** and ask *"Summarize the Japan trip — Tokyo, Kyoto 
       }));
     } else {
       status = 'indexing vault…';
-      for (const note of vault) {
+      // First run, gate now closed → getLocale() is the language the user chose at the gate. Freeze the
+      // demo content (notes + hand-authored graph) in that language, then persist + index it once.
+      const seed = getSeed(getLocale());
+      vault = seed.notes.map((n) => ({ ...n }));
+      for (const note of seed.notes) {
         await store.upsertNote({
           docId: note.docId,
           title: note.title,
           body: note.text,
-          aliases: note.aliases,
-          kind: note.kind,
-          sourcePath: note.sourcePath,
-          frontmatter: note.frontmatter
+          aliases: note.aliases
         });
         // The onboarding tour note is META (it literally CONTAINS the example questions). Indexing it
         // would make every suggested question self-match the tour as its top hit — crowding out the
@@ -900,7 +636,7 @@ Set the search to **trip/** and ask *"Summarize the Japan trip — Tokyo, Kyoto 
         // Seed the PRE-BUILT graph for this note (entities + mentions + relations) with no LLM, so the
         // demo's knowledge graph is ready the instant the vault loads — the user never waits for the
         // chat model to load + extract. Runs after indexNote so the chunks exist for mention edges.
-        const ex = SEED_GRAPH[note.docId];
+        const ex = seed.graph[note.docId];
         if (ex) await seedDocGraph(store, note.docId, note.text, ex);
       }
       // First run: greet the user with the guided "Start here" tour (read view) instead of a blank
@@ -1837,6 +1573,9 @@ Set the search to **trip/** and ask *"Summarize the Japan trip — Tokyo, Kyoto 
   function closeModelGate() {
     const firstRun = !uiPrefs.isOnboarded();
     modelGate = false;
+    // Unblock first-run seeding now that a language is locked in (see the gate-await in onMount).
+    gateClosed?.();
+    gateClosed = null;
     uiPrefs.setOnboarded(true);
     // First time the gate is dismissed (picked or skipped) → roll straight into the guided tour,
     // unless the user has already seen it. Deferred a tick so the gate overlay is fully gone first.
@@ -4020,6 +3759,20 @@ Set the search to **trip/** and ask *"Summarize the Japan trip — Tokyo, Kyoto 
           <strong>{t('gate.title')}</strong>
           <p class="dim sm">{t('gate.desc')}</p>
         </div>
+        <!-- Language picked HERE, before seeding, decides the demo notes' language (getSeed at seed time). -->
+        <div class="gate-lang" role="group" aria-label={t('gate.language')}>
+          <span class="gate-lang-lbl dim sm">{t('gate.language')}</span>
+          <div class="gate-lang-seg">
+            {#each SUPPORTED as l (l.code)}
+              <button
+                class="gate-lang-btn"
+                class:on={getLocale() === l.code}
+                aria-pressed={getLocale() === l.code}
+                onclick={() => setLocale(l.code)}>{l.native}</button
+              >
+            {/each}
+          </div>
+        </div>
         {#if gpu?.ok}
           {@const rec = recommendModel(true, hwHint)}
           {#if rec}<button
@@ -5858,6 +5611,42 @@ Set the search to **trip/** and ask *"Summarize the Japan trip — Tokyo, Kyoto 
   }
   .gate-head p {
     margin: 6px 0 0;
+  }
+  .gate-lang {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 4px;
+  }
+  .gate-lang-lbl {
+    font-weight: 600;
+  }
+  .gate-lang-seg {
+    display: flex;
+    gap: 4px;
+    padding: 3px;
+    border-radius: var(--r-md);
+    background: var(--bg);
+    border: 1px solid var(--line);
+  }
+  .gate-lang-btn {
+    font: inherit;
+    font-size: 13px;
+    padding: 5px 12px;
+    border: none;
+    border-radius: calc(var(--r-md) - 3px);
+    background: transparent;
+    color: var(--ink);
+    cursor: pointer;
+  }
+  .gate-lang-btn:hover {
+    background: var(--accent-soft);
+  }
+  .gate-lang-btn.on {
+    background: var(--accent);
+    color: #fff;
+    font-weight: 600;
   }
   .gate-auto {
     display: flex;

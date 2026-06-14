@@ -105,6 +105,7 @@ export const en: Dict = {
 
   // ── Model gate ───────────────────────────────────────────────────────────
   'gate.title': 'Your private AI assistant',
+  'gate.language': 'Language',
   'gate.desc':
     'Runs entirely on your computer — downloaded once, then works offline. No account, and nothing ever leaves your device.',
   'gate.recommended': '★ Recommended — {label}',

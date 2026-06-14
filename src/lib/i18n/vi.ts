@@ -104,6 +104,7 @@ export const vi: Dict = {
 
   // ── Model gate ───────────────────────────────────────────────────────────
   'gate.title': 'Trợ lý AI riêng tư của bạn',
+  'gate.language': 'Ngôn ngữ',
   'gate.desc':
     'Chạy hoàn toàn trên máy bạn — tải về một lần, sau đó dùng ngoại tuyến. Không cần tài khoản, và không gì rời khỏi thiết bị của bạn.',
   'gate.recommended': '★ Khuyến nghị — {label}',
