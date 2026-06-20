@@ -2907,7 +2907,7 @@
       >
       <a
         class="icon-btn nb-hov nb-press"
-        href="https://github.com/thienzz/Nebula"
+        href="https://github.com/beevr-labs/Nebula"
         target="_blank"
         rel="noopener noreferrer"
         title={t('topbar.github')}

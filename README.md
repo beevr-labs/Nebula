@@ -2,12 +2,12 @@
 
 > **Notes that think. Nothing leaves your device.**
 
-[![Deploy to GitHub Pages](https://github.com/thienzz/Nebula/actions/workflows/deploy.yml/badge.svg)](https://github.com/thienzz/Nebula/actions/workflows/deploy.yml)
-[![Live demo](https://img.shields.io/badge/%E2%96%B6_live_demo-thienzz.github.io%2FNebula-7c5cff)](https://thienzz.github.io/Nebula/)
+[![Deploy to GitHub Pages](https://github.com/beevr-labs/Nebula/actions/workflows/deploy.yml/badge.svg)](https://github.com/beevr-labs/Nebula/actions/workflows/deploy.yml)
+[![Live demo](https://img.shields.io/badge/%E2%96%B6_live_demo-beevr-labs.github.io%2FNebula-7c5cff)](https://beevr-labs.github.io/Nebula/)
 [![tests](https://img.shields.io/badge/tests-430+_passing-3fb950)](#under-the-hood)
 [![backend](https://img.shields.io/badge/backend-none-555)](#under-the-hood)
 
-**[▶ Open the live demo →](https://thienzz.github.io/Nebula/)** — no install, no sign-up, nothing uploaded. It opens with a small demo vault so you can try everything in about a minute.
+**[▶ Open the live demo →](https://beevr-labs.github.io/Nebula/)** — no install, no sign-up, nothing uploaded. It opens with a small demo vault so you can try everything in about a minute.
 
 ---
 
@@ -40,7 +40,7 @@ Perfect for onboarding (*"who owns what?"*), incidents (*"who do I loop in?"*), 
 
 ### 🤝 A deal war-room — from scattered notes to a game plan
 
-This is exactly the vault the [live demo](https://thienzz.github.io/Nebula/) opens with, so you can follow along. You're closing a deal and your notes are scattered the way they really are — a status note, a budget note, a competitor note, and so on:
+This is exactly the vault the [live demo](https://beevr-labs.github.io/Nebula/) opens with, so you can follow along. You're closing a deal and your notes are scattered the way they really are — a status note, a budget note, a competitor note, and so on:
 
 ```
 aurora-status.md       In final negotiation; signature expected this quarter.
@@ -114,4 +114,4 @@ Apache License 2.0 — see [LICENSE](LICENSE). Free to use, modify, and distribu
 
 ---
 
-**[▶ Try Nebula now →](https://thienzz.github.io/Nebula/)** — your notes, finally answering back.
+**[▶ Try Nebula now →](https://beevr-labs.github.io/Nebula/)** — your notes, finally answering back.
