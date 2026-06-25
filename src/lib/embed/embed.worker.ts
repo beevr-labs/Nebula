@@ -5,6 +5,7 @@
 // `indexText` streams `progress` then a final `ok` result.
 
 import { chunk, approxSizingIsSafe, type Chunk } from '../ingest/chunker';
+import { headingIndex, sectionAt, docTitleOf, buildEmbedText } from '../ingest/embed-text';
 import { embed, embedBatch, makeBgeTokenCounter, getEmbedder, embedInfo } from './embedder';
 
 type Req =
@@ -74,10 +75,19 @@ ctx.onmessage = async (e: MessageEvent<Req>) => {
       countTokens: sizer // undefined → chunker's whitespace approxTokenCount (no tokenizer needed)
     });
     ctx.postMessage({ id, progress: { done: 0, total: cs.length } });
+    // Embed a CONTEXTUALIZED, structure-stripped view of each chunk (embed-text.ts): "Note title ›
+    // Section" prefix + markdown/table noise removed. The chunk's stored `.text` stays verbatim, so
+    // citations (charStart/charEnd) and the lexical channel are untouched — only the vector changes.
+    const headings = headingIndex(payload.text);
+    const docTitle = docTitleOf(headings);
     const out: EmbeddedChunk[] = [];
     for (let i = 0; i < cs.length; i += EMBED_BATCH) {
       const slice = cs.slice(i, i + EMBED_BATCH);
-      const vecs = await embedBatch(slice.map((c) => c.text));
+      const vecs = await embedBatch(
+        slice.map((c) =>
+          buildEmbedText({ docTitle, section: sectionAt(headings, c.charStart), body: c.text })
+        )
+      );
       for (let j = 0; j < slice.length; j++) out.push({ chunk: slice[j], embedding: vecs[j] });
       ctx.postMessage({
         id,
