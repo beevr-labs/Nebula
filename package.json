@@ -6,6 +6,11 @@
   "description": "Nebula — local-first knowledge graph & context engine (Windows-first MVP).",
   "license": "Apache-2.0",
   "author": "Thien Nguyen <thien@beevr.ai>",
+  "homepage": "https://beevr.ai/ai-development-company",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/beevr-labs/Nebula.git"
+  },
   "scripts": {
     "dev": "vite dev",
     "build": "vite build",

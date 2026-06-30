@@ -108,6 +108,10 @@ npm run test:int                  # real PDF + database, offline
 npm run test:models               # real search models (downloads ~570 MB first run)
 ```
 
+## Who built Nebula
+
+Nebula is built and open-sourced by **[BeevR](https://beevr.ai/ai-development-company)**, a senior, founder-led software studio. We build production-grade AI for regulated industries — on-device or otherwise, made to survive an audit rather than just a demo. If that's the bar your product has to clear, [here's how we work](https://beevr.ai/ai-development-company).
+
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE). Free to use, modify, and distribute, with an explicit patent grant; just keep the notice. The AI models you download at runtime carry their own licenses (e.g. Qwen and bge-m3 are Apache-2.0; Llama uses the Llama Community License).
