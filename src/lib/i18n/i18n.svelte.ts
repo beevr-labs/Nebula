@@ -19,17 +19,12 @@ export const SUPPORTED: { code: Locale; label: string; native: string }[] = [
 
 const DICTS: Record<Locale, Dict> = { en, vi };
 
-/** Pick the startup language: a saved choice, else the browser's language (vi*→vi), else English. */
+/** Pick the startup language: a saved choice, else English. English is the default for a fresh
+ *  install regardless of the browser's language — the user can switch to Vietnamese via the topbar
+ *  globe, and that choice is then remembered (uiPrefs). */
 function detectInitial(): Locale {
   const saved = uiPrefs.getLocale();
   if (saved === 'en' || saved === 'vi') return saved;
-  try {
-    const langs = (typeof navigator !== 'undefined' && navigator.languages) || [];
-    const nav = [...langs, typeof navigator !== 'undefined' ? navigator.language : ''];
-    if (nav.some((l) => l && l.toLowerCase().startsWith('vi'))) return 'vi';
-  } catch {
-    /* SSR / locked-down — fall through to English */
-  }
   return 'en';
 }
 
